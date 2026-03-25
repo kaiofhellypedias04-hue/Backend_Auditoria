@@ -28,4 +28,4 @@ COPY . .
 
 RUN mkdir -p /app/runtime/saida /app/runtime/temp /app/runtime/certs
 
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "gunicorn -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:${PORT:-10000} api:app"]

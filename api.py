@@ -13,6 +13,7 @@ Novidades em relação à v2.1.0:
 """
 
 import io
+import logging
 import os
 import re
 import time
@@ -71,6 +72,7 @@ from modules.settings import get_settings
 
 # ─── App e CORS ───────────────────────────────────────────────────────────────
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 settings.ensure_runtime_dirs()
 
@@ -194,6 +196,39 @@ def _get_aliases_validos(login_type: LoginTypeEnum) -> set:
         return {c.get("alias") for c in certs if c.get("alias")}
 
 
+def _is_tmp_runtime_path(path_value: Path) -> bool:
+    normalized = str(path_value).replace("\\", "/").lower()
+    return normalized == "/tmp" or normalized.startswith("/tmp/") or normalized.endswith(":/tmp") or "/tmp/" in normalized
+
+
+def _log_runtime_storage_info() -> None:
+    runtime_info = {
+        "APP_ENV": settings.app_env,
+        "APP_DATA_DIR": settings.app_data_dir,
+        "CERTS_JSON_PATH": settings.certs_json_path,
+        "CREDENTIALS_JSON_PATH": settings.credentials_json_path,
+        "SECRETS_FILE_PATH": settings.secrets_file_path,
+        "OUTPUT_DIR": settings.output_dir,
+        "TEMP_DIR": settings.temp_dir,
+    }
+
+    logger.info("Runtime storage configuration:")
+    for key, value in runtime_info.items():
+        logger.info("  %s=%s", key, value)
+
+    if settings.app_env == "production":
+        tmp_entries = [
+            f"{key}={value}"
+            for key, value in runtime_info.items()
+            if key != "APP_ENV" and _is_tmp_runtime_path(Path(value))
+        ]
+        if tmp_entries:
+            logger.warning(
+                "Storage efemero detectado em producao. Os caminhos abaixo apontam para /tmp e podem causar perda de dados apos restart/redeploy: %s",
+                ", ".join(tmp_entries),
+            )
+
+
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
@@ -201,6 +236,7 @@ def startup_event():
     try:
         settings.validate(require_database=True)
         settings.ensure_runtime_dirs()
+        _log_runtime_storage_info()
         ensure_database_extensions()
         garantir_schema_nfse_execucoes()
     except Exception as exc:

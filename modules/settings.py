@@ -49,6 +49,29 @@ def _is_server_env(app_env: str) -> bool:
     return app_env == "production" or _env_bool("RENDER", default=False)
 
 
+def _is_tmp_path(path: Path) -> bool:
+    normalized = str(path).replace("\\", "/").lower()
+    return normalized == "/tmp" or normalized.startswith("/tmp/") or normalized.endswith(":/tmp") or "/tmp/" in normalized
+
+
+def _can_prepare_directory(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+
+def _remap_runtime_path(path: Path, source_root: Path, target_root: Path) -> Path:
+    try:
+        relative = path.relative_to(source_root)
+    except ValueError:
+        return path
+    return (target_root / relative).resolve()
+
+
 @dataclass(frozen=True)
 class AppSettings:
     app_name: str
@@ -111,6 +134,32 @@ class AppSettings:
                 "Defina-as nas environment variables do Render ou em um .env local."
             )
 
+    def validate_runtime_paths_for_production(self, raise_on_tmp: bool = False) -> None:
+        if self.app_env != "production":
+            return
+
+        runtime_paths = {
+            "APP_DATA_DIR": self.app_data_dir,
+            "OUTPUT_DIR": self.output_dir,
+            "TEMP_DIR": self.temp_dir,
+            "CERTS_DIR": self.certs_dir,
+            "CERTS_JSON_PATH": self.certs_json_path,
+            "CREDENTIALS_JSON_PATH": self.credentials_json_path,
+            "SECRETS_FILE_PATH": self.secrets_file_path,
+        }
+        tmp_entries = [f"{name}={path}" for name, path in runtime_paths.items() if _is_tmp_path(path)]
+        if not tmp_entries:
+            return
+
+        message = (
+            "Configuracao de runtime insegura para producao: os caminhos abaixo apontam para /tmp: "
+            + ", ".join(tmp_entries)
+            + ". Defina APP_DATA_DIR e caminhos derivados para um volume persistente, como /var/data/backend."
+        )
+        if raise_on_tmp:
+            raise RuntimeError(message)
+        print(f"[settings] AVISO: {message}")
+
     def as_runtime_info(self) -> dict[str, str | bool | list[str]]:
         return {
             "app_env": self.app_env,
@@ -148,7 +197,7 @@ class AppSettings:
 def get_settings() -> AppSettings:
     app_env = os.getenv("APP_ENV", "development").strip().lower() or "development"
     server_env = _is_server_env(app_env)
-    default_app_data_dir = (Path(tempfile.gettempdir()) / "backend_render_ready") if server_env else (PROJECT_ROOT / "runtime")
+    default_app_data_dir = Path("/var/data/backend") if server_env else (PROJECT_ROOT / "runtime")
     app_data_dir = _resolve_path(os.getenv("APP_DATA_DIR"), default_app_data_dir)
     output_dir = _resolve_path(
         os.getenv("OUTPUT_DIR") or os.getenv("DATA_DIR"),
@@ -166,10 +215,36 @@ def get_settings() -> AppSettings:
         app_data_dir / "secrets.runtime.json",
     )
 
-    default_cors = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173"
-    cors_origins = _parse_csv(os.getenv("CORS_ORIGINS", default_cors if app_env != "production" else ""))
+    if server_env and not _can_prepare_directory(app_data_dir):
+        original_app_data_dir = app_data_dir
+        fallback_app_data_dir = _resolve_path(None, Path("/tmp/backend_render_ready"))
+        print(
+            "[settings] AVISO: sem permissao para usar "
+            f"{original_app_data_dir} em producao. "
+            f"Usando fallback efemero em {fallback_app_data_dir}. "
+            "Os dados de runtime podem ser perdidos apos restart/redeploy."
+        )
+        app_data_dir = fallback_app_data_dir
+        output_dir = _remap_runtime_path(output_dir, original_app_data_dir, fallback_app_data_dir)
+        temp_dir = _remap_runtime_path(temp_dir, original_app_data_dir, fallback_app_data_dir)
+        certs_dir = _remap_runtime_path(certs_dir, original_app_data_dir, fallback_app_data_dir)
+        certs_json_path = _remap_runtime_path(certs_json_path, original_app_data_dir, fallback_app_data_dir)
+        credentials_json_path = _remap_runtime_path(
+            credentials_json_path,
+            original_app_data_dir,
+            fallback_app_data_dir,
+        )
+        secrets_file_path = _remap_runtime_path(
+            secrets_file_path,
+            original_app_data_dir,
+            fallback_app_data_dir,
+        )
 
-    return AppSettings(
+    default_cors = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173"
+    cors_raw = os.getenv("CORS_ORIGINS")
+    cors_origins = _parse_csv(cors_raw if cors_raw is not None else (default_cors if app_env != "production" else ""))
+
+    settings = AppSettings(
         app_name="API Auditoria NFS-e",
         app_version="2.2.0",
         app_env=app_env,
@@ -201,6 +276,8 @@ def get_settings() -> AppSettings:
         s3_secret_key=os.getenv("S3_SECRET_KEY"),
         s3_region=os.getenv("S3_REGION", "us-east-1"),
     )
+    settings.validate_runtime_paths_for_production(raise_on_tmp=False)
+    return settings
 
 
 def env_names_for_alias(prefix: str, alias: str) -> Iterable[str]:

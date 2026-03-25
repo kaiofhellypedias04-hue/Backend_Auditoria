@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ from shutil import which
 
 from .cert_manager import get_password, get_credential_password
 from .settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _preflight_playwright_runtime(settings) -> Optional[str]:
@@ -27,6 +30,65 @@ def _preflight_playwright_runtime(settings) -> Optional[str]:
         )
 
     return None
+
+
+def _validate_playwright_browser_launch(settings) -> Optional[str]:
+    validation_script = (
+        "const { chromium } = require('playwright');"
+        "(async()=>{"
+        "const browser = await chromium.launch({ headless: true });"
+        "await browser.close();"
+        "console.log('PLAYWRIGHT_CHROMIUM_OK');"
+        "})().catch(err=>{"
+        "console.error(err && (err.stack || err.message) ? (err.stack || err.message) : String(err));"
+        "process.exit(1);"
+        "});"
+    )
+
+    try:
+        proc = subprocess.run(
+            [settings.node_bin, "-e", validation_script],
+            cwd=str(settings.package_json_path.parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=min(30, max(10, int(settings.playwright_timeout_ms / 1000))),
+        )
+    except FileNotFoundError:
+        return f"Node.js nao encontrado no PATH. Binario configurado: {settings.node_bin}"
+    except subprocess.TimeoutExpired:
+        return (
+            "Falha ao validar o Chromium do Playwright no ambiente. "
+            "A validacao excedeu o tempo limite."
+        )
+    except Exception as exc:
+        return f"Erro ao validar o Chromium do Playwright: {exc}"
+
+    if proc.returncode == 0:
+        logger.info("Preflight do Playwright concluido com sucesso.")
+        return None
+
+    combined_output = " ".join(
+        part.strip() for part in [proc.stderr or "", proc.stdout or ""] if part.strip()
+    )
+    msg_lower = combined_output.lower()
+    if (
+        "please run the following command to download new browsers" in msg_lower
+        or "executable doesn't exist" in msg_lower
+        or "browsertype.launch" in msg_lower
+    ):
+        return (
+            "Playwright/Chromium não instalado no ambiente de deploy. "
+            "Configure o build com: npx playwright install --with-deps chromium"
+        )
+
+    short_output = combined_output[:500] + ("..." if len(combined_output) > 500 else "")
+    return (
+        "Falha ao inicializar o Chromium do Playwright no ambiente de deploy. "
+        f"Detalhe: {short_output or 'erro sem detalhes'}"
+    )
 
 
 def _run_node_download(
@@ -206,7 +268,12 @@ def executar_fluxo_nfse_playwright(
         return False, 0, False, f"package.json não encontrado: {package_json_path}"
     runtime_error = _preflight_playwright_runtime(settings)
     if runtime_error:
+        logger.error("Preflight do Playwright falhou: %s", runtime_error)
         return False, 0, False, runtime_error
+    browser_error = _validate_playwright_browser_launch(settings)
+    if browser_error:
+        logger.error("Validação do Chromium do Playwright falhou: %s", browser_error)
+        return False, 0, False, browser_error
 
     Path(diretorio_base).mkdir(parents=True, exist_ok=True)
     if download_dir is None:
@@ -266,7 +333,7 @@ def executar_fluxo_nfse_playwright(
         if "please run the following command to download new browsers" in msg_lower:
             error_msg = (
                 "Playwright instalado sem browsers. "
-                "No Render, rode 'npx playwright install chromium' no build ou use o Dockerfile do projeto."
+                "No Render, rode 'npx playwright install --with-deps chromium' no build ou use o Dockerfile do projeto."
             )
         elif "executable doesn't exist" in msg_lower:
             error_msg = (
