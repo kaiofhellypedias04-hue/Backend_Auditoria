@@ -39,6 +39,10 @@ def _parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _is_server_env(app_env: str) -> bool:
+    return app_env == "production" or _env_bool("RENDER", default=False)
+
+
 @dataclass(frozen=True)
 class AppSettings:
     app_name: str
@@ -137,7 +141,9 @@ class AppSettings:
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
     app_env = os.getenv("APP_ENV", "development").strip().lower() or "development"
-    app_data_dir = _resolve_path(os.getenv("APP_DATA_DIR"), PROJECT_ROOT / "runtime")
+    server_env = _is_server_env(app_env)
+    default_app_data_dir = Path("/tmp/backend_render_ready") if server_env else (PROJECT_ROOT / "runtime")
+    app_data_dir = _resolve_path(os.getenv("APP_DATA_DIR"), default_app_data_dir)
     output_dir = _resolve_path(
         os.getenv("OUTPUT_DIR") or os.getenv("DATA_DIR"),
         app_data_dir / "saida",
@@ -179,7 +185,7 @@ def get_settings() -> AppSettings:
         npm_bin=os.getenv("NPM_BIN", "npm"),
         playwright_timeout_ms=int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "300000")),
         cors_origins=cors_origins,
-        enable_keyring_fallback=_env_bool("ENABLE_KEYRING_FALLBACK", default=True),
+        enable_keyring_fallback=_env_bool("ENABLE_KEYRING_FALLBACK", default=not server_env),
         database_url=os.getenv("DATABASE_URL"),
         db_sslmode=os.getenv("DB_SSLMODE"),
         db_connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "15")),

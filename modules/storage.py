@@ -18,11 +18,14 @@ import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.client import Config
 from botocore.exceptions import ClientError
+
+from .settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,20 @@ def get_s3_settings() -> dict:
 
 def is_s3_configured() -> bool:
     s = get_s3_settings()
-    return all([s["endpoint"], s["bucket"], s["access_key"], s["secret_key"]])
+    if not all([s["endpoint"], s["bucket"], s["access_key"], s["secret_key"]]):
+        return False
+
+    settings = get_settings()
+    try:
+        host = (urlsplit(s["endpoint"]).hostname or "").lower()
+    except Exception:
+        host = ""
+
+    if settings.app_env == "production" and host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        logger.warning("[MinIO] Endpoint local ignorado em producao: %s", s["endpoint"])
+        return False
+
+    return True
 
 
 # ── Pool de clientes por thread (cada thread tem seu próprio cliente) ─────────

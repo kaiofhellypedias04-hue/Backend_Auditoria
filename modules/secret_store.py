@@ -47,7 +47,7 @@ def _read_json_mapping(env_name: str) -> dict[str, str]:
 
 def _get_from_keyring(service_name: str, alias: str) -> Optional[str]:
     settings = get_settings()
-    if not settings.enable_keyring_fallback:
+    if settings.app_env == "production" or not settings.enable_keyring_fallback:
         return None
     try:
         import keyring
@@ -61,7 +61,7 @@ def _get_from_keyring(service_name: str, alias: str) -> Optional[str]:
 
 def _set_in_keyring(service_name: str, alias: str, secret: str) -> None:
     settings = get_settings()
-    if not settings.enable_keyring_fallback:
+    if settings.app_env == "production" or not settings.enable_keyring_fallback:
         return
     try:
         import keyring
@@ -72,7 +72,7 @@ def _set_in_keyring(service_name: str, alias: str, secret: str) -> None:
 
 def _delete_from_keyring(service_name: str, alias: str) -> None:
     settings = get_settings()
-    if not settings.enable_keyring_fallback:
+    if settings.app_env == "production" or not settings.enable_keyring_fallback:
         return
     try:
         import keyring
