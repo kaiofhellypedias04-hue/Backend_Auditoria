@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: backend-render-ready
+    env: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /health
+    disk:
+      name: backend-runtime
+      mountPath: /var/data/backend
+      sizeGB: 5
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: APP_DATA_DIR
+        value: /var/data/backend
+      - key: DATA_DIR
+        value: /var/data/backend/saida
+      - key: OUTPUT_DIR
+        value: /var/data/backend/saida
+      - key: TEMP_DIR
+        value: /var/data/backend/temp
+      - key: CERTS_DIR
+        value: /var/data/backend/certs
+      - key: CERTS_JSON_PATH
+        value: /var/data/backend/certs.json
+      - key: CREDENTIALS_JSON_PATH
+        value: /var/data/backend/credentials.json
+      - key: SECRETS_FILE_PATH
+        value: /var/data/backend/secrets.runtime.json
+      - key: ENABLE_KEYRING_FALLBACK
+        value: "false"
+      - key: PLAYWRIGHT_TIMEOUT_MS
+        value: "300000"
