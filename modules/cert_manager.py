@@ -68,6 +68,11 @@ def _projeto_root() -> Path:
     return get_settings().project_root
 
 
+def _safe_alias_filename(alias: str) -> str:
+    safe = re.sub(r"[^\w\-. ]", "_", alias.strip()).strip(" ._")
+    return safe or "certificado"
+
+
 def _certs_path() -> str:
     return str(get_settings().certs_json_path)
 
@@ -210,9 +215,16 @@ def remove_credential(credentials_json_path: str, alias: str) -> List[Dict]:
 
 def adicionar_certificado(alias: str, client_name: str, pfx_bytes: bytes, password: str) -> dict:
     certs_json = _certs_path()
-    cert_file = _certs_dir() / f"{alias}.pfx"
+    cert_file = _certs_dir() / f"{_safe_alias_filename(alias)}.pfx"
 
-    cert_file.write_bytes(pfx_bytes)
+    if not pfx_bytes:
+        raise ValueError("Arquivo de certificado vazio.")
+
+    try:
+        cert_file.write_bytes(pfx_bytes)
+    except Exception as exc:
+        raise RuntimeError(f"Nao foi possivel salvar o certificado em {cert_file}: {exc}") from exc
+
     upsert_cert(certs_json, alias, str(cert_file))
     set_password(alias, password)
 
@@ -236,7 +248,7 @@ def editar_certificado(alias: str, novo_alias: Optional[str] = None, client_name
             raise ValueError(f"Alias '{novo_alias}' já está em uso")
 
         old_path = Path(cert["pfxPath"])
-        new_path = _certs_dir() / f"{novo_alias}.pfx"
+        new_path = _certs_dir() / f"{_safe_alias_filename(novo_alias)}.pfx"
         if old_path.exists():
             old_path.rename(new_path)
 

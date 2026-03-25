@@ -8,9 +8,25 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from shutil import which
 
 from .cert_manager import get_password, get_credential_password
 from .settings import get_settings
+
+
+def _preflight_playwright_runtime(settings) -> Optional[str]:
+    if which(settings.node_bin) is None:
+        return f"Node.js nao encontrado no PATH. Binario configurado: {settings.node_bin}"
+
+    playwright_pkg = settings.package_json_path.parent / "node_modules" / "playwright"
+    playwright_core_pkg = settings.package_json_path.parent / "node_modules" / "playwright-core"
+    if not playwright_pkg.exists() and not playwright_core_pkg.exists():
+        return (
+            "Dependencias Node/Playwright nao encontradas no servidor. "
+            "Execute npm ci e playwright install no build do Render ou use o Dockerfile do projeto."
+        )
+
+    return None
 
 
 def _run_node_download(
@@ -188,6 +204,9 @@ def executar_fluxo_nfse_playwright(
         return False, 0, False, f"Script Playwright não encontrado: {script_path}"
     if not package_json_path.exists():
         return False, 0, False, f"package.json não encontrado: {package_json_path}"
+    runtime_error = _preflight_playwright_runtime(settings)
+    if runtime_error:
+        return False, 0, False, runtime_error
 
     Path(diretorio_base).mkdir(parents=True, exist_ok=True)
     if download_dir is None:
@@ -243,6 +262,17 @@ def executar_fluxo_nfse_playwright(
             or (((result.get("stdout") or "").strip()[:500] + "...") if (result.get("stdout") or "").strip() else "")
             or "erro desconhecido no Playwright"
         )
+        msg_lower = str(error_msg).lower()
+        if "please run the following command to download new browsers" in msg_lower:
+            error_msg = (
+                "Playwright instalado sem browsers. "
+                "No Render, rode 'npx playwright install chromium' no build ou use o Dockerfile do projeto."
+            )
+        elif "executable doesn't exist" in msg_lower:
+            error_msg = (
+                "Browser do Playwright nao encontrado no servidor. "
+                "Instale os browsers do Playwright durante o build."
+            )
         print(f"❌ Playwright falhou para {login_desc}: {error_msg}")
 
         msg_lower = str(error_msg).lower()

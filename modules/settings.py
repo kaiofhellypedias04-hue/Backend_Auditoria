@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -27,6 +28,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def _resolve_path(value: str | None, fallback: Path) -> Path:
     if not value:
         return fallback.resolve()
+
+    if os.name == "nt" and value.startswith("/tmp"):
+        relative_tmp = value[len("/tmp"):].lstrip("/\\")
+        return (Path(tempfile.gettempdir()) / relative_tmp).resolve()
+
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -142,7 +148,7 @@ class AppSettings:
 def get_settings() -> AppSettings:
     app_env = os.getenv("APP_ENV", "development").strip().lower() or "development"
     server_env = _is_server_env(app_env)
-    default_app_data_dir = Path("/tmp/backend_render_ready") if server_env else (PROJECT_ROOT / "runtime")
+    default_app_data_dir = (Path(tempfile.gettempdir()) / "backend_render_ready") if server_env else (PROJECT_ROOT / "runtime")
     app_data_dir = _resolve_path(os.getenv("APP_DATA_DIR"), default_app_data_dir)
     output_dir = _resolve_path(
         os.getenv("OUTPUT_DIR") or os.getenv("DATA_DIR"),

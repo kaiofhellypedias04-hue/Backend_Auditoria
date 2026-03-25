@@ -80,9 +80,12 @@ def run_with_process(cfg: ProcessRunConfig, logger=None):
         atualizar_status_execucao(cfg.execution_id, 'completed', finished_at=datetime.now())
         
     except Exception as e:
-        atualizar_status_processo(cfg.processo_id, StatusEnum.failed, finished_at=datetime.now(), error_message=str(e))
-        atualizar_status_execucao(cfg.execution_id, 'failed', finished_at=datetime.now(), error=str(e), traceback=traceback.format_exc())
-        raise
+        aliases = ", ".join(cfg.cert_aliases or [])
+        error_message = f"Processo {cfg.processo_id} falhou para [{aliases}]: {e}"
+        logger_cleanup.exception("[Processo] Falha na execucao %s / processo %s", cfg.execution_id, cfg.processo_id)
+        atualizar_status_processo(cfg.processo_id, StatusEnum.failed, finished_at=datetime.now(), error_message=error_message)
+        atualizar_status_execucao(cfg.execution_id, 'failed', finished_at=datetime.now(), error=error_message, traceback=traceback.format_exc())
+        raise RuntimeError(error_message) from e
 
 
 def _apenas_upload(tarefa: dict) -> dict:
