@@ -1,12 +1,5 @@
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    APP_ENV=production \
-    PORT=10000
-
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY package.json package-lock.json ./
@@ -28,4 +21,4 @@ COPY . .
 
 RUN mkdir -p /app/runtime/saida /app/runtime/temp /app/runtime/certs
 
-CMD ["sh", "-c", "gunicorn -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:${PORT:-10000} api:app"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "api:app", "--bind", "0.0.0.0:8080"]
