@@ -35,6 +35,9 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 import time
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .cache import (
     buscar_cnpj_no_cache,

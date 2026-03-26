@@ -7,14 +7,19 @@ import traceback
 import glob
 import os
 import time
+from pathlib import Path
 from datetime import date, datetime, timedelta
 import json
+from dotenv import load_dotenv
 
 from modules.gui import obter_configuracoes_iniciais
 from modules.nfse_xml_converter import NFSeXMLConverterComAPI
 from modules.cache import init_cache_database, limpar_cache_expirado
 from modules.runner import RunConfig, run_processing
+from modules.settings import get_settings
 from modules.spreadsheet import atualizar_planilha_incremental
+
+load_dotenv()
 
 
 def carregar_certificados(caminho: str):
@@ -175,9 +180,9 @@ def main():
         print(f"Diretório base: {config['diretorio_base']}")
         print("="*60)
 
-        projeto_root = os.path.dirname(os.path.abspath(__file__))
-        certs_path = os.path.join(projeto_root, "certs.json")
-        credentials_path = os.path.join(projeto_root, "credentials.json")
+        settings = get_settings()
+        certs_path = str(Path(settings.certs_json_path))
+        credentials_path = str(Path(settings.credentials_json_path))
         
         # Obtém o tipo de login da configuração
         login_type = config.get('tipo_login', 'certificado')

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -14,6 +13,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DOTENV_PATH = PROJECT_ROOT / ".env"
 
+load_dotenv()
 if DOTENV_PATH.exists():
     load_dotenv(DOTENV_PATH)
 
@@ -28,10 +28,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def _resolve_path(value: str | None, fallback: Path) -> Path:
     if not value:
         return fallback.resolve()
-
-    if os.name == "nt" and value.startswith("/tmp"):
-        relative_tmp = value[len("/tmp"):].lstrip("/\\")
-        return (Path(tempfile.gettempdir()) / relative_tmp).resolve()
 
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -64,12 +60,11 @@ def _can_prepare_directory(path: Path) -> bool:
         return False
 
 
-def _remap_runtime_path(path: Path, source_root: Path, target_root: Path) -> Path:
-    try:
-        relative = path.relative_to(source_root)
-    except ValueError:
-        return path
-    return (target_root / relative).resolve()
+def ensure_json_file(path: Path, default_content: str = "{}") -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(default_content, encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -114,6 +109,9 @@ class AppSettings:
         }
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
+        ensure_json_file(self.certs_json_path, "[]")
+        ensure_json_file(self.credentials_json_path, "[]")
+        ensure_json_file(self.secrets_file_path)
 
     @property
     def cors_allow_all(self) -> bool:
@@ -196,49 +194,14 @@ class AppSettings:
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
     app_env = os.getenv("APP_ENV", "development").strip().lower() or "development"
-    server_env = _is_server_env(app_env)
-    default_app_data_dir = Path("/var/data/backend") if server_env else (PROJECT_ROOT / "runtime")
+    default_app_data_dir = Path(os.getenv("APP_DATA_DIR", "/data/backend"))
     app_data_dir = _resolve_path(os.getenv("APP_DATA_DIR"), default_app_data_dir)
-    output_dir = _resolve_path(
-        os.getenv("OUTPUT_DIR") or os.getenv("DATA_DIR"),
-        app_data_dir / "saida",
-    )
-    temp_dir = _resolve_path(os.getenv("TEMP_DIR"), app_data_dir / "temp")
-    certs_dir = _resolve_path(os.getenv("CERTS_DIR"), app_data_dir / "certs")
-    certs_json_path = _resolve_path(os.getenv("CERTS_JSON_PATH"), app_data_dir / "certs.json")
-    credentials_json_path = _resolve_path(
-        os.getenv("CREDENTIALS_JSON_PATH"),
-        app_data_dir / "credentials.json",
-    )
-    secrets_file_path = _resolve_path(
-        os.getenv("SECRETS_FILE_PATH"),
-        app_data_dir / "secrets.runtime.json",
-    )
-
-    if server_env and not _can_prepare_directory(app_data_dir):
-        original_app_data_dir = app_data_dir
-        fallback_app_data_dir = _resolve_path(None, Path("/tmp/backend_render_ready"))
-        print(
-            "[settings] AVISO: sem permissao para usar "
-            f"{original_app_data_dir} em producao. "
-            f"Usando fallback efemero em {fallback_app_data_dir}. "
-            "Os dados de runtime podem ser perdidos apos restart/redeploy."
-        )
-        app_data_dir = fallback_app_data_dir
-        output_dir = _remap_runtime_path(output_dir, original_app_data_dir, fallback_app_data_dir)
-        temp_dir = _remap_runtime_path(temp_dir, original_app_data_dir, fallback_app_data_dir)
-        certs_dir = _remap_runtime_path(certs_dir, original_app_data_dir, fallback_app_data_dir)
-        certs_json_path = _remap_runtime_path(certs_json_path, original_app_data_dir, fallback_app_data_dir)
-        credentials_json_path = _remap_runtime_path(
-            credentials_json_path,
-            original_app_data_dir,
-            fallback_app_data_dir,
-        )
-        secrets_file_path = _remap_runtime_path(
-            secrets_file_path,
-            original_app_data_dir,
-            fallback_app_data_dir,
-        )
+    output_dir = app_data_dir / "saida"
+    temp_dir = app_data_dir / "temp"
+    certs_dir = app_data_dir / "certs"
+    certs_json_path = certs_dir / "certs.json"
+    credentials_json_path = app_data_dir / "credentials.json"
+    secrets_file_path = app_data_dir / "secrets.runtime.json"
 
     default_cors = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173"
     cors_raw = os.getenv("CORS_ORIGINS")
@@ -266,9 +229,9 @@ def get_settings() -> AppSettings:
         npm_bin=os.getenv("NPM_BIN", "npm"),
         playwright_timeout_ms=int(os.getenv("PLAYWRIGHT_TIMEOUT_MS", "300000")),
         cors_origins=cors_origins,
-        enable_keyring_fallback=_env_bool("ENABLE_KEYRING_FALLBACK", default=not server_env),
+        enable_keyring_fallback=_env_bool("ENABLE_KEYRING_FALLBACK", default=app_env != "production"),
         database_url=os.getenv("DATABASE_URL"),
-        db_sslmode=os.getenv("DB_SSLMODE"),
+        db_sslmode=os.getenv("DB_SSLMODE", "require"),
         db_connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "15")),
         s3_endpoint=os.getenv("S3_ENDPOINT"),
         s3_bucket=os.getenv("S3_BUCKET"),
@@ -276,8 +239,26 @@ def get_settings() -> AppSettings:
         s3_secret_key=os.getenv("S3_SECRET_KEY"),
         s3_region=os.getenv("S3_REGION", "us-east-1"),
     )
+    if not _can_prepare_directory(app_data_dir):
+        raise RuntimeError(
+            f"APP_DATA_DIR inacessivel: {app_data_dir}. "
+            "Configure APP_DATA_DIR para um volume persistente com permissao de escrita."
+        )
+    settings.ensure_runtime_dirs()
+    print(f"[settings] APP_DATA_DIR = {settings.app_data_dir}")
+    print(f"[settings] CERTS_DIR = {settings.certs_dir}")
     settings.validate_runtime_paths_for_production(raise_on_tmp=False)
     return settings
+
+
+BASE_DATA_DIR = _resolve_path(os.getenv("APP_DATA_DIR"), Path(os.getenv("APP_DATA_DIR", "/data/backend")))
+APP_DATA_DIR = BASE_DATA_DIR
+OUTPUT_DIR = BASE_DATA_DIR / "saida"
+TEMP_DIR = BASE_DATA_DIR / "temp"
+CERTS_DIR = BASE_DATA_DIR / "certs"
+CERTS_JSON_PATH = CERTS_DIR / "certs.json"
+CREDENTIALS_JSON_PATH = BASE_DATA_DIR / "credentials.json"
+SECRETS_FILE_PATH = BASE_DATA_DIR / "secrets.runtime.json"
 
 
 def env_names_for_alias(prefix: str, alias: str) -> Iterable[str]:

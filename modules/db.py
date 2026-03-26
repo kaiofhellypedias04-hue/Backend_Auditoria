@@ -22,6 +22,7 @@ def ensure_database_extensions() -> None:
         get_database_url(),
         row_factory=dict_row,
         connect_timeout=settings.db_connect_timeout,
+        sslmode=settings.db_sslmode or "require",
     )
     try:
         with conn.cursor() as cur:
@@ -38,6 +39,7 @@ def get_conn():
         get_database_url(),
         row_factory=dict_row,
         connect_timeout=settings.db_connect_timeout,
+        sslmode=settings.db_sslmode or "require",
     )
     try:
         yield conn

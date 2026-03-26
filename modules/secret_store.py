@@ -5,13 +5,14 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
-from .settings import env_names_for_alias, get_settings
+from .settings import ensure_json_file, env_names_for_alias, get_settings
 
 
 _LOCK = Lock()
 
 
 def _read_store(path: Path) -> dict:
+    ensure_json_file(path)
     if not path.exists():
         return {"certificates": {}, "credentials": {}}
     try:

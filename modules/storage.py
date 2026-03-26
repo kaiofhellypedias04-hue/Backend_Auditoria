@@ -1,29 +1,16 @@
 """
-Integração com MinIO/S3 compatível.
+Integracao com storage S3 compativel.
 
-- Upload de PDFs, XMLs e relatórios após processamento
-- Geração de URLs pré-assinadas para download (válidas por 1h)
-- Limpeza automática de arquivos com mais de 15 dias
-
-Otimizações:
-- Pool de clientes S3 por thread (thread-safe)
-- Configurações em cache (lidas uma única vez)
-- put_object direto em vez de upload_file (menos overhead)
-- TransferConfig ajustado para arquivos pequenos (PDFs/XMLs de NFS-e)
+- Upload de PDFs, XMLs e relatorios apos processamento
+- Geracao de URLs pre-assinadas para download
+- Limpeza automatica de arquivos antigos
 """
-import os
-import io
-import threading
 import logging
-from datetime import datetime, timezone, timedelta
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
-
-import boto3
-from boto3.s3.transfer import TransferConfig
-from botocore.client import Config
-from botocore.exceptions import ClientError
 
 from .settings import get_settings
 
@@ -31,28 +18,32 @@ logger = logging.getLogger(__name__)
 
 RETENCAO_DIAS = 15
 
-# ── Cache de configurações (lido uma vez, não a cada upload) ──────────────────
 _settings_cache: Optional[dict] = None
 _settings_lock = threading.Lock()
+_thread_local = threading.local()
+
 
 def get_s3_settings() -> dict:
     global _settings_cache
     if _settings_cache is None:
         with _settings_lock:
             if _settings_cache is None:
+                settings = get_settings()
                 _settings_cache = {
-                    "endpoint":   os.getenv("S3_ENDPOINT"),
-                    "bucket":     os.getenv("S3_BUCKET"),
-                    "access_key": os.getenv("S3_ACCESS_KEY"),
-                    "secret_key": os.getenv("S3_SECRET_KEY"),
-                    "region":     os.getenv("S3_REGION", "us-east-1"),
+                    "endpoint": settings.s3_endpoint,
+                    "bucket": settings.s3_bucket,
+                    "access_key": settings.s3_access_key,
+                    "secret_key": settings.s3_secret_key,
+                    "region": settings.s3_region,
                 }
     return _settings_cache
 
 
 def is_s3_configured() -> bool:
     s = get_s3_settings()
-    if not all([s["endpoint"], s["bucket"], s["access_key"], s["secret_key"]]):
+    if not s["endpoint"] or not s["bucket"]:
+        return False
+    if not s["access_key"] or not s["secret_key"]:
         return False
 
     settings = get_settings()
@@ -62,18 +53,21 @@ def is_s3_configured() -> bool:
         host = ""
 
     if settings.app_env == "production" and host in {"localhost", "127.0.0.1", "0.0.0.0"}:
-        logger.warning("[MinIO] Endpoint local ignorado em producao: %s", s["endpoint"])
+        logger.warning("[S3] Endpoint local ignorado em producao: %s", s["endpoint"])
         return False
 
     return True
 
 
-# ── Pool de clientes por thread (cada thread tem seu próprio cliente) ─────────
-_thread_local = threading.local()
-
 def get_s3_client():
-    """Retorna um cliente S3 exclusivo para a thread atual — thread-safe."""
+    """Retorna um cliente S3 exclusivo para a thread atual."""
+    if not is_s3_configured():
+        return None
+
     if not hasattr(_thread_local, "client"):
+        import boto3
+        from botocore.client import Config
+
         s = get_s3_settings()
         _thread_local.client = boto3.client(
             "s3",
@@ -83,7 +77,7 @@ def get_s3_client():
             region_name=s["region"],
             config=Config(
                 signature_version="s3v4",
-                max_pool_connections=1,       # 1 por thread é suficiente
+                max_pool_connections=1,
                 connect_timeout=10,
                 read_timeout=30,
                 retries={"max_attempts": 3, "mode": "adaptive"},
@@ -92,39 +86,29 @@ def get_s3_client():
     return _thread_local.client
 
 
-# TransferConfig para arquivos pequenos (PDFs/XMLs de NFS-e são < 2MB geralmente)
-# Desativa multipart (overhead desnecessário para arquivos pequenos)
-_transfer_config = TransferConfig(
-    multipart_threshold=10 * 1024 * 1024,  # só usa multipart acima de 10MB
-    max_concurrency=1,                      # 1 por thread (paralelismo já é externo)
-    use_threads=False,                      # threads gerenciadas pelo runner_processos
-)
-
-
 def upload_file(
     file_path: str,
     storage_key: str,
     content_type: Optional[str] = None,
 ) -> Optional[str]:
-    if not is_s3_configured():
+    s3 = get_s3_client()
+    if s3 is None:
         return None
 
-    s3     = get_s3_client()
     bucket = get_s3_settings()["bucket"]
-    path   = Path(file_path)
+    path = Path(file_path)
 
     try:
-        # put_object com bytes em memória: mais rápido que upload_file para arquivos < 10MB
-        dados = path.read_bytes()
-        kwargs = {"Bucket": bucket, "Key": storage_key, "Body": dados}
+        data = path.read_bytes()
+        kwargs = {"Bucket": bucket, "Key": storage_key, "Body": data}
         if content_type:
             kwargs["ContentType"] = content_type
 
         s3.put_object(**kwargs)
-        logger.debug(f"[MinIO] Upload OK: {storage_key} ({len(dados)/1024:.0f} KB)")
+        logger.debug("[S3] Upload OK: %s (%.0f KB)", storage_key, len(data) / 1024)
         return storage_key
-    except Exception as e:
-        logger.error(f"[MinIO] Erro no upload de {file_path}: {e}")
+    except Exception as exc:
+        logger.error("[S3] Erro no upload de %s: %s", file_path, exc)
         return None
 
 
@@ -138,7 +122,8 @@ def upload_pdf(file_path: str, storage_key: str) -> Optional[str]:
 
 def upload_relatorio(file_path: str, storage_key: str) -> Optional[str]:
     return upload_file(
-        file_path, storage_key,
+        file_path,
+        storage_key,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -147,9 +132,10 @@ def generate_presigned_download_url(
     storage_key: str,
     expires_in: int = 3600,
 ) -> Optional[str]:
-    if not is_s3_configured():
-        return None
     s3 = get_s3_client()
+    if s3 is None:
+        return None
+
     s = get_s3_settings()
     try:
         return s3.generate_presigned_url(
@@ -157,78 +143,71 @@ def generate_presigned_download_url(
             Params={"Bucket": s["bucket"], "Key": storage_key},
             ExpiresIn=expires_in,
         )
-    except Exception as e:
-        logger.error(f"[MinIO] Erro ao gerar URL pré-assinada para {storage_key}: {e}")
+    except Exception as exc:
+        logger.error("[S3] Erro ao gerar URL pre-assinada para %s: %s", storage_key, exc)
         return None
 
 
 def get_local_file_path(caminho_local: str) -> Path:
     path = Path(caminho_local)
     if not path.exists():
-        raise FileNotFoundError(f"Arquivo local não encontrado: {caminho_local}")
+        raise FileNotFoundError(f"Arquivo local nao encontrado: {caminho_local}")
     return path
 
 
-# ─── Limpeza automática de arquivos antigos no MinIO ─────────────────────────
-
 def limpar_arquivos_antigos_minio(dias: int = RETENCAO_DIAS) -> dict:
-    """
-    Remove do MinIO todos os objetos com mais de `dias` dias.
-    Também atualiza o banco marcando storage_key = NULL nos registros
-    cujos arquivos foram removidos.
-
-    Retorna um dict com { "removidos": int, "erros": int, "prefixos_verificados": list }
-    """
     if not is_s3_configured():
-        logger.info("[MinIO] S3 não configurado — limpeza ignorada.")
+        logger.info("[S3] Storage externo nao configurado; limpeza ignorada.")
         return {"removidos": 0, "erros": 0}
 
     s3 = get_s3_client()
+    if s3 is None:
+        logger.info("[S3] Cliente indisponivel; limpeza ignorada.")
+        return {"removidos": 0, "erros": 0}
+
     s = get_s3_settings()
     bucket = s["bucket"]
-    corte = datetime.now(timezone.utc) - timedelta(days=dias)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=dias)
 
-    removidos = 0
-    erros = 0
-    chaves_removidas = []
+    removed = 0
+    errors = 0
+    removed_keys = []
 
-    logger.info(f"[MinIO] Iniciando limpeza de arquivos anteriores a {corte.strftime('%d/%m/%Y %H:%M UTC')}")
+    logger.info("[S3] Iniciando limpeza de arquivos anteriores a %s", cutoff.strftime("%d/%m/%Y %H:%M UTC"))
 
     try:
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket):
             for obj in page.get("Contents", []):
                 last_modified = obj["LastModified"]
-                # Garante que last_modified tem timezone
                 if last_modified.tzinfo is None:
                     last_modified = last_modified.replace(tzinfo=timezone.utc)
 
-                if last_modified < corte:
+                if last_modified < cutoff:
                     try:
                         s3.delete_object(Bucket=bucket, Key=obj["Key"])
-                        chaves_removidas.append(obj["Key"])
-                        removidos += 1
-                        logger.debug(f"[MinIO] Removido: {obj['Key']}")
-                    except ClientError as e:
-                        erros += 1
-                        logger.error(f"[MinIO] Erro ao remover {obj['Key']}: {e}")
+                        removed_keys.append(obj["Key"])
+                        removed += 1
+                        logger.debug("[S3] Removido: %s", obj["Key"])
+                    except Exception as exc:
+                        errors += 1
+                        logger.error("[S3] Erro ao remover %s: %s", obj["Key"], exc)
+    except Exception as exc:
+        logger.error("[S3] Erro ao listar objetos para limpeza: %s", exc)
 
-    except Exception as e:
-        logger.error(f"[MinIO] Erro ao listar objetos para limpeza: {e}")
-
-    # Atualizar banco: marcar storage_key = NULL para arquivos removidos
-    if chaves_removidas:
+    if removed_keys:
         try:
             from .db import get_conn
+
             with get_conn() as conn:
-                for chave in chaves_removidas:
+                for key in removed_keys:
                     conn.execute(
                         "UPDATE nfse_processo_arquivos SET storage_key = NULL WHERE storage_key = %s",
-                        (chave,),
+                        (key,),
                     )
-            logger.info(f"[MinIO] Banco atualizado: {len(chaves_removidas)} registros marcados sem storage_key")
-        except Exception as e:
-            logger.warning(f"[MinIO] Não foi possível atualizar banco após limpeza: {e}")
+            logger.info("[S3] Banco atualizado: %s registros marcados sem storage_key", len(removed_keys))
+        except Exception as exc:
+            logger.warning("[S3] Nao foi possivel atualizar banco apos limpeza: %s", exc)
 
-    logger.info(f"[MinIO] Limpeza concluída: {removidos} removidos, {erros} erros")
-    return {"removidos": removidos, "erros": erros, "chaves": chaves_removidas}
+    logger.info("[S3] Limpeza concluida: %s removidos, %s erros", removed, errors)
+    return {"removidos": removed, "erros": errors, "chaves": removed_keys}

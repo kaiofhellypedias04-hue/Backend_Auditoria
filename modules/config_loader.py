@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from .settings import get_settings
+from .settings import ensure_json_file, get_settings
 
 
 def _load_json_array(path: Path, label: str) -> list[dict]:
@@ -28,6 +28,8 @@ def carregar_certificados(caminho: str | None = None) -> list[dict]:
     legacy_path = settings.project_root / "certs.json"
     if not path.exists() and legacy_path.exists():
         path = legacy_path
+    if path == settings.certs_json_path:
+        ensure_json_file(path, "[]")
     data = _load_json_array(path, "certs.json")
     certs: list[dict] = []
     for item in data:
@@ -45,6 +47,8 @@ def carregar_credenciais(caminho: str | None = None) -> list[dict]:
     legacy_path = settings.project_root / "credentials.json"
     if not path.exists() and legacy_path.exists():
         path = legacy_path
+    if path == settings.credentials_json_path:
+        ensure_json_file(path, "[]")
     data = _load_json_array(path, "credentials.json")
     creds: list[dict] = []
     for item in data:

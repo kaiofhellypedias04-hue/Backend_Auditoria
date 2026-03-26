@@ -12,6 +12,7 @@ from modules.cert_manager import (
     load_credentials, upsert_credential, remove_credential, get_credential_password, 
     set_credential_password, delete_credential_password
 )
+from modules.settings import get_settings
 
 def obter_configuracoes_iniciais():
     """Cria interface gráfica para o usuário escolher o modo de operação"""
@@ -59,8 +60,7 @@ def obter_configuracoes_iniciais():
         - Senhas ficam no Windows Credential Manager (service: nfse_auditoria)
         """
         try:
-            projeto_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            certs_path = os.path.join(projeto_root, "certs.json")
+            certs_path = str(get_settings().certs_json_path)
 
             win = tk.Toplevel(root)
             win.title("Gerenciar Certificados (PFX)")
@@ -284,8 +284,7 @@ def obter_configuracoes_iniciais():
         - Senhas ficam no Windows Credential Manager (service: nfse_auditoria_credentials)
         """
         try:
-            projeto_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            credentials_path = os.path.join(projeto_root, "credentials.json")
+            credentials_path = str(get_settings().credentials_json_path)
 
             win = tk.Toplevel(root)
             win.title("Gerenciar Credenciais CPF/CNPJ")
@@ -996,9 +995,9 @@ def obter_configuracoes_iniciais():
     frame_cert_single.grid_remove()
 
     # Carregar lista de certificados
-    projeto_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    certs_path = os.path.join(projeto_root, "certs.json")
-    credentials_path = os.path.join(projeto_root, "credentials.json")
+    settings = get_settings()
+    certs_path = str(settings.certs_json_path)
+    credentials_path = str(settings.credentials_json_path)
     certs = load_certs(certs_path)
     cert_aliases = [c.get("alias", "") for c in certs if c.get("alias")]
 

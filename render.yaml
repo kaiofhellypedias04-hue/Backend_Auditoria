@@ -31,11 +31,13 @@ services:
       - key: CERTS_DIR
         value: /var/data/backend/certs
       - key: CERTS_JSON_PATH
-        value: /var/data/backend/certs.json
+        value: /var/data/backend/certs/certs.json
       - key: CREDENTIALS_JSON_PATH
         value: /var/data/backend/credentials.json
       - key: SECRETS_FILE_PATH
         value: /var/data/backend/secrets.runtime.json
+      - key: DB_SSLMODE
+        value: require
       - key: ENABLE_KEYRING_FALLBACK
         value: "false"
       - key: PLAYWRIGHT_TIMEOUT_MS

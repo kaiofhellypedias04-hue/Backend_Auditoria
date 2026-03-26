@@ -259,7 +259,7 @@ def executar_fluxo_nfse_playwright(
     tipo_nota: str = "tomados",
 ) -> Tuple[bool, int, bool, Optional[str]]:
     settings = get_settings()
-    script_path = settings.playwright_script_path
+    script_path = Path(settings.playwright_script_path).resolve()
     package_json_path = settings.package_json_path
 
     if not script_path.exists():

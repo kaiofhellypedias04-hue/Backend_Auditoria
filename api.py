@@ -30,6 +30,9 @@ from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from modules.processos_repo import criar_processo, obter_processo, listar_processos
 from modules.execucoes_repo import (
@@ -67,7 +70,7 @@ from modules.cert_manager import (
     redefinir_senha_credencial,
     validar_cpf_cnpj,
 )
-from modules.settings import get_settings
+from modules.settings import BASE_DATA_DIR, CERTS_DIR, OUTPUT_DIR, TEMP_DIR, get_settings
 
 
 # ─── App e CORS ───────────────────────────────────────────────────────────────
@@ -232,10 +235,17 @@ def _log_runtime_storage_info() -> None:
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
+def ensure_directories():
+    for directory in (BASE_DATA_DIR, OUTPUT_DIR, TEMP_DIR, CERTS_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+@app.on_event("startup")
 def startup_event():
     try:
         settings.validate(require_database=True)
         settings.ensure_runtime_dirs()
+        ensure_directories()
         _log_runtime_storage_info()
         ensure_database_extensions()
         garantir_schema_nfse_execucoes()
@@ -298,7 +308,7 @@ def startup_event():
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {
         "name": settings.app_name,
@@ -307,7 +317,7 @@ def root():
     }
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {
         "status": "ok",
@@ -315,6 +325,23 @@ def health():
         "environment": settings.app_env,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.api_route("/health/db", methods=["GET", "HEAD"])
+def health_db():
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+        return {
+            "status": "ok",
+            "database": "ok",
+            "result": row["?column?"] if isinstance(row, dict) and "?column?" in row else 1,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database_unavailable: {exc}")
 
 
 # ─── Certificados ─────────────────────────────────────────────────────────────

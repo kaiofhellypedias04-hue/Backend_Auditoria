@@ -18,10 +18,13 @@ from __future__ import annotations
 import argparse
 import os
 from datetime import date, datetime, timedelta
+from dotenv import load_dotenv
 
 from modules.config_loader import carregar_certificados
 from modules.runner import RunConfig, run_processing
 from modules.settings import get_settings
+
+load_dotenv()
 
 
 def _parse_bool(v: str) -> bool:

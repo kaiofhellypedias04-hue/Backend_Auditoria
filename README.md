@@ -125,3 +125,15 @@ Exemplo diário às 03:00:
 ```bash
 0 3 * * * /caminho/projeto/.venv/bin/python /caminho/projeto/cli.py --modo automatico --base-dir /data/nfse --certificados todos --headless true >> /var/log/nfse.log 2>&1
 ```
+
+## Deploy em Railway + Supabase
+
+- Configure `DATABASE_URL` com a string do Supabase.
+- Configure `DB_SSLMODE=require`.
+- Monte um volume persistente e aponte `APP_DATA_DIR=/data/backend`.
+- Defina `CORS_ORIGINS` com os dominios reais do frontend, separados por virgula.
+- Comando de start:
+
+```bash
+gunicorn api:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+```

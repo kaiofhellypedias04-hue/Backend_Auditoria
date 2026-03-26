@@ -20,7 +20,7 @@ from .secret_store import (
     set_certificate_password,
     set_credential_password as set_credential_secret,
 )
-from .settings import get_settings
+from .settings import ensure_json_file, get_settings
 
 
 def _apenas_digitos(s: str) -> str:
@@ -89,6 +89,7 @@ def _certs_dir() -> Path:
 
 
 def load_certs(certs_json_path: str) -> List[Dict]:
+    ensure_json_file(Path(certs_json_path), "[]")
     if not os.path.exists(certs_json_path):
         return []
     with open(certs_json_path, "r", encoding="utf-8") as f:
@@ -150,6 +151,7 @@ def remove_cert(certs_json_path: str, alias: str) -> List[Dict]:
 
 
 def load_credentials(credentials_json_path: str) -> List[Dict]:
+    ensure_json_file(Path(credentials_json_path), "[]")
     if not os.path.exists(credentials_json_path):
         return []
     try:
