@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook, Workbook
 
+from .fiscal_status import compute_final_note_status
 from .nfse_keys import gerar_chave_nfse
 
 SHEET_TODAS = "Todas as Notas"
@@ -151,44 +152,16 @@ def _today_sp() -> str:
 
 
 def _divergente(d: dict) -> bool:
-    # mesma lógica do converter.save_to_excel (para novos itens)
-    # Status Base de Cálculo: Se Valor B/C > 0 = Correto, se = 0 E é MEI = Correto, se = 0 E não é MEI = Divergente
-    valor_bc = d.get('Valor B/C', 0)
-    # Converte para número (trata strings com vírgula, etc.)
-    try:
-        if isinstance(valor_bc, str):
-            valor_bc = valor_bc.replace('.', '').replace(',', '.')
-        valor_bc = float(valor_bc)
-    except (ValueError, TypeError):
-        valor_bc = 0.0
-    
-    # Se base > 0, não é divergente por base de cálculo
-    if valor_bc > 0:
-        base_calculo_divergente = False
-    else:
-        # Verifica se é MEI (XML ou API)
-        regime_xml = str(d.get('Simples Nacional / XML', '')).upper()
-        regime_api = str(d.get('Consulta Simples API', '')).upper()
-        if 'MEI' in regime_xml or 'MEI' in regime_api:
-            base_calculo_divergente = False
-        else:
-            base_calculo_divergente = True
-    
-    # Verifica outros status
-    outros_status = [
-        d.get("Status Simples Nacional"),
-        d.get("Status CSRF"),
-        d.get("Status IRRF"),
-        d.get("Status INSS"),
-        d.get("Status Valor Líquido")
-    ]
-    
-    has_outros_divergentes = any(
-        v is not None and str(v).strip() not in ["Correto", ""]
-        for v in outros_status
+    status = compute_final_note_status(
+        {
+            "status_simples_nacional": d.get("Status Simples Nacional"),
+            "status_csrf": d.get("Status CSRF"),
+            "status_irrf": d.get("Status IRRF"),
+            "status_inss": d.get("Status INSS"),
+            "status_valor_liquido": d.get("Status Valor Líquido"),
+        }
     )
-    
-    return base_calculo_divergente or has_outros_divergentes
+    return status == "divergente"
 
 
 def _get_key(d: dict) -> str:

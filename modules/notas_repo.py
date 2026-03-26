@@ -6,20 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from psycopg.types.json import Jsonb
 
 from .db import get_conn
+from .fiscal_status import build_sql_status_expr, compute_base_calculation_status
 from .nfse_keys import gerar_chave_nfse
 
 
-STATUS_EXPR = """(
-    CASE
-      WHEN COALESCE(n.status_csrf, 'ok') = 'ok'
-       AND COALESCE(n.status_irrf, 'ok') = 'ok'
-       AND COALESCE(n.status_inss, 'ok') = 'ok'
-       AND COALESCE(n.status_base_calculo, 'ok') = 'ok'
-       AND COALESCE(n.status_valor_liquido, 'ok') = 'ok'
-      THEN 'correta'
-      ELSE 'divergente'
-    END
-)"""
+STATUS_EXPR = build_sql_status_expr("n")
 
 
 def garantir_schema_nfse_notas():
@@ -96,6 +87,24 @@ def garantir_schema_nfse_notas():
         )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_processo_notas_nota ON nfse_processo_notas (nota_id)")
+        conn.execute(
+            """
+            UPDATE nfse_notas
+            SET status_base_calculo = CASE
+                    WHEN valor_bc IS NULL THEN 'ausente'
+                    WHEN valor_bc < -0.01 THEN 'divergente'
+                    WHEN valor_total IS NOT NULL AND valor_bc > valor_total + 0.01 THEN 'divergente'
+                    ELSE 'ok'
+                END,
+                updated_at = now()
+            WHERE status_base_calculo IS DISTINCT FROM CASE
+                    WHEN valor_bc IS NULL THEN 'ausente'
+                    WHEN valor_bc < -0.01 THEN 'divergente'
+                    WHEN valor_total IS NOT NULL AND valor_bc > valor_total + 0.01 THEN 'divergente'
+                    ELSE 'ok'
+                END
+            """
+        )
 
 
 def _to_text_alertas(value: Any) -> Optional[str]:
@@ -281,7 +290,7 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
         )
 
     status_valor_liquido = _status_compare(valor_liquido, valor_liquido_correto)
-    status_base_calculo  = _status_compare(valor_bc, valor_total)
+    status_base_calculo  = compute_base_calculation_status(valor_bc, valor_total)
 
     campos_ausentes_xml  = _build_campos_ausentes_xml(data)
     alertas_fiscais_txt  = _to_text_alertas(data.get("Alertas Fiscais"))
@@ -576,6 +585,8 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    COALESCE(n.parte_exibicao_doc, n.cnpj_prestador, '—') as parte_exibicao_doc,
                    n.valor_total,
                    n.valor_bc as valor_base,
+                   n.csrf,
+                   n.percentual_irrf,
                    n.valor_liquido,
                    n.valor_liquido_correto,
                    n.status_valor_liquido,
@@ -584,8 +595,22 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    n.inss,
                    {STATUS_EXPR} as status,
                    n.campos_ausentes_xml,
+                   n.incidencia_iss,
+                   n.data_pagamento,
+                   n.codigo_servico,
+                   n.descricao_servico,
+                   n.codigo_nbs,
+                   n.codigo_cnae as cnae,
+                   n.descricao_cnae,
+                   n.simples_xml as simples_nacional,
+                   n.consulta_simples_api,
+                   n.status_simples_nacional,
+                   n.status_csrf,
+                   n.status_irrf,
+                   n.status_inss,
+                   n.status_base_calculo,
                    n.alertas_fiscais,
-                   n.created_at,
+                   n.created_at as dia_processado,
                    n.updated_at
             FROM nfse_notas n
             LEFT JOIN nfse_processo_notas ppn ON ppn.nota_id = n.id

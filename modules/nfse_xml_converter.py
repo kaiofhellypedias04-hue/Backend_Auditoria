@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 import re
 import unicodedata
 import pandas as pd
+from .fiscal_status import compute_base_calculation_status, compute_final_note_status
 import os
 import traceback
 from datetime import datetime
@@ -1127,15 +1128,8 @@ class NFSeXMLConverter:
         df['Valor B/C'] = pd.to_numeric(df['Valor B/C'], errors='coerce').fillna(0.0)
         
         def _status_base_calculo(row):
-            valor_bc = row['Valor B/C']
-            if valor_bc > 0:
-                return 'Correto'
-            # Verifica se é MEI (XML ou API)
-            regime_xml = str(row.get('Simples Nacional / XML', '')).upper()
-            regime_api = str(row.get('Consulta Simples API', '')).upper()
-            if 'MEI' in regime_xml or 'MEI' in regime_api:
-                return 'Correto'
-            return 'Divergente'
+            status = compute_base_calculation_status(row['Valor B/C'], row['Valor Total'])
+            return 'Correto' if status == 'ok' else 'Divergente'
         
         df['Status Base de Cálculo'] = df.apply(_status_base_calculo, axis=1)
         # Restaurar formato original de string para a coluna
@@ -1165,12 +1159,17 @@ class NFSeXMLConverter:
             if col in df.columns:
                 df = df.drop(columns=[col])
         
-        df['_Divergente'] = (
-            (df['Status Simples Nacional'] != 'Correto') |
-            (df['Status CSRF'] != 'Correto') |
-            (df['Status IRRF'] != 'Correto') |
-            (df['Status INSS'] != 'Correto') |
-            (df['Status Valor Líquido'] != 'Correto')
+        df['_Divergente'] = df.apply(
+            lambda row: compute_final_note_status(
+                {
+                    'status_simples_nacional': row.get('Status Simples Nacional'),
+                    'status_csrf': row.get('Status CSRF'),
+                    'status_irrf': row.get('Status IRRF'),
+                    'status_inss': row.get('Status INSS'),
+                    'status_valor_liquido': row.get('Status Valor Líquido'),
+                }
+            ) == 'divergente',
+            axis=1
         )
         
         df_divergentes = df[df['_Divergente']].copy()

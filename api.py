@@ -59,6 +59,7 @@ from modules.schemas import (
 from modules.reports import gerar_relatorio_processo
 from modules.db import get_conn, ensure_database_extensions
 from modules.config_loader import carregar_certificados, carregar_credenciais
+from modules.export_utils import serialize_export_value
 from modules.scheduler import (
     iniciar_agendamento, parar_agendamento, listar_agendamentos,
     restaurar_agendamentos_do_banco,
@@ -1022,7 +1023,7 @@ def download_relatorio_csv(processo_id: str):
     writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_ALL)
     writer.writerow([h for h, _ in COLUNAS])
     for row in items:
-        writer.writerow([str(row.get(k, "") or "") for _, k in COLUNAS])
+        writer.writerow([serialize_export_value(row.get(k)) for _, k in COLUNAS])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
     nome_csv = f"relatorio_{proc.cert_alias.replace(' ', '_')[:30]}_{proc.start_date}.csv"
