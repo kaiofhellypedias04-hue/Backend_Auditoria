@@ -247,6 +247,7 @@ def _build_campos_ausentes_xml(data: dict) -> Optional[str]:
 
 def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arquivo_origem: str | None = None) -> str:
     tipo_nota = "tomados"
+    arquivo_origem = arquivo_origem or data.get("_arquivo_origem") or data.get("_Arquivo_Origem")
 
     if processo_id:
         with get_conn() as conn:
@@ -439,6 +440,32 @@ def atualizar_nota_campos_editaveis(nota_id: int, valor_liquido_correto: Optiona
             (novo_correto, alertas_fiscais, novo_status, nota_id),
         )
     return True
+
+
+def obter_nota_por_id(nota_id: int) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                n.id,
+                n.cert_alias,
+                COALESCE(ppn.processo_id, n.processo_id) AS processo_id,
+                n.chave_nfse,
+                n.numero_documento,
+                n.arquivo_origem,
+                n.competencia,
+                n.data_emissao,
+                n.updated_at
+            FROM nfse_notas n
+            LEFT JOIN nfse_processo_notas ppn ON ppn.nota_id = n.id
+            WHERE n.id = %s
+            ORDER BY ppn.created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            (nota_id,),
+        ).fetchone()
+
+    return dict(row) if row else None
 
 
 def _build_where(filters: Optional[dict], processo_id: Optional[str] = None) -> Tuple[str, List[Any]]:

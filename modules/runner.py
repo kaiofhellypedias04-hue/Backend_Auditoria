@@ -112,9 +112,10 @@ def run_processing(cfg: RunConfig, logger=None) -> None:
         # persistir no banco (dedupe por cert_alias+chave_nfse)
         for d in dados:
             try:
-                salvar_nota_nfse(cert_alias, getattr(cfg, 'processo_id', None), d, arquivo_origem=d.get('_arquivo_origem'))
+                arquivo_origem = d.get('_arquivo_origem') or d.get('_Arquivo_Origem')
+                salvar_nota_nfse(cert_alias, getattr(cfg, 'processo_id', None), d, arquivo_origem=arquivo_origem)
             except Exception as save_err:
-                logger.warning(f"Erro salvando nota | nota_chave={gerar_chave_nfse(d)} | arquivo={d.get('_arquivo_origem')} | erro={save_err}")
+                logger.warning(f"Erro salvando nota | nota_chave={gerar_chave_nfse(d)} | arquivo={d.get('_arquivo_origem') or d.get('_Arquivo_Origem')} | erro={save_err}")
 
         # planilha do período (incremental, 1 arquivo por execução/período)
         # Regra: salvar SEMPRE de acordo com o período filtrado (start/end),

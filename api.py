@@ -42,19 +42,20 @@ from modules.execucoes_repo import (
     listar_execucoes,
     garantir_schema_nfse_execucoes,
 )
-from modules.arquivos_repo import listar_arquivos_processo, obter_arquivo_processo
+from modules.arquivos_repo import listar_arquivos_processo, obter_arquivo_processo, localizar_documento_nota
 from modules.notas_repo import (
     listar_notas_por_processo,
     obter_resumo_processo,
     listar_notas_agrupadas,
     atualizar_nota_campos_editaveis,
+    obter_nota_por_id,
 )
 from modules.runner_processos import run_with_process, ProcessRunConfig, RunConfig
 from modules.storage import is_s3_configured, generate_presigned_download_url, limpar_arquivos_antigos_minio
 from modules.schemas import (
     StatusEnum, LoginTypeEnum, TipoNotaEnum, Pagination,
     ProcessoResponse, ArquivoResponse, NotaReportFilters,
-    NotaReportRow, SummaryResponse, ProcessoCreate,
+    NotaReportRow, SummaryResponse, ProcessoCreate, NotaDocumentosResponse,
 )
 from modules.reports import gerar_relatorio_processo
 from modules.db import get_conn, ensure_database_extensions
@@ -775,6 +776,57 @@ def atualizar_nota(nota_id: int, data: NotaEditRequest):
     if not ok:
         raise HTTPException(status_code=404, detail=f"Nota {nota_id} não encontrada")
     return {"success": True, "nota_id": nota_id}
+
+
+def _montar_link_documento(arq: Optional[ArquivoResponse]) -> Optional[dict]:
+    if not arq:
+        return None
+
+    route = f"/processos/{arq.processo_id}/arquivos/{arq.id}/download"
+    tipo = arq.tipo_arquivo.value if hasattr(arq.tipo_arquivo, "value") else str(arq.tipo_arquivo)
+    return {
+        "arquivo_id": arq.id,
+        "processo_id": arq.processo_id,
+        "tipo": tipo,
+        "nome_arquivo": arq.nome_arquivo,
+        "content_type": arq.content_type,
+        "tamanho_bytes": arq.tamanho_bytes,
+        "storage_key": arq.storage_key,
+        "view_url": route,
+        "download_url": route,
+    }
+
+
+@app.get("/nfse/{nota_id}/documentos", response_model=NotaDocumentosResponse)
+def get_nfse_documentos(nota_id: int):
+    nota = obter_nota_por_id(nota_id)
+    if not nota:
+        raise HTTPException(status_code=404, detail="Nota nÃ£o encontrada")
+
+    xml = localizar_documento_nota(
+        "xml",
+        processo_id=nota.get("processo_id"),
+        arquivo_origem=nota.get("arquivo_origem"),
+        numero_documento=nota.get("numero_documento"),
+        chave_nfse=nota.get("chave_nfse"),
+    )
+    pdf = localizar_documento_nota(
+        "pdf",
+        processo_id=nota.get("processo_id"),
+        arquivo_origem=nota.get("arquivo_origem"),
+        numero_documento=nota.get("numero_documento"),
+        chave_nfse=nota.get("chave_nfse"),
+    )
+
+    return {
+        "nota_id": nota_id,
+        "processo_id": str(nota.get("processo_id")) if nota.get("processo_id") else None,
+        "numero_documento": nota.get("numero_documento"),
+        "chave_nfse": nota.get("chave_nfse"),
+        "arquivo_origem": nota.get("arquivo_origem"),
+        "xml": _montar_link_documento(xml),
+        "pdf": _montar_link_documento(pdf),
+    }
 
 
 # ─── Processos ────────────────────────────────────────────────────────────────
