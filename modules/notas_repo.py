@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+from pathlib import Path
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg.types.json import Jsonb
 
 from .db import get_conn
-from .fiscal_status import build_sql_status_expr, compute_base_calculation_status
 from .nfse_keys import gerar_chave_nfse
 
 
-STATUS_EXPR = build_sql_status_expr("n")
+STATUS_EXPR = """(
+    CASE
+      WHEN COALESCE(n.status_csrf, 'ok') = 'ok'
+       AND COALESCE(n.status_irrf, 'ok') = 'ok'
+       AND COALESCE(n.status_inss, 'ok') = 'ok'
+       AND COALESCE(n.status_base_calculo, 'ok') = 'ok'
+       AND COALESCE(n.status_valor_liquido, 'ok') = 'ok'
+      THEN 'correta'
+      ELSE 'divergente'
+    END
+)"""
+
+STATUS_FILA_EXPR = f"""COALESCE(NULLIF(n.status_fila_manual, ''), {STATUS_EXPR})"""
 
 
 def garantir_schema_nfse_notas():
@@ -54,6 +67,13 @@ def garantir_schema_nfse_notas():
           status_valor_liquido TEXT,
           campos_ausentes_xml TEXT,
           alertas_fiscais TEXT,
+          irrf_calculado NUMERIC,
+          csrf_calculado NUMERIC,
+          iss_calculado NUMERIC,
+          observacao_interna TEXT,
+          status_fila_manual TEXT,
+          prioridade_manual TEXT,
+          responsavel TEXT,
           tipo_nota TEXT,
           parte_exibicao_nome TEXT,
           parte_exibicao_doc TEXT,
@@ -74,10 +94,19 @@ def garantir_schema_nfse_notas():
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS valor_liquido_correto NUMERIC")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS status_valor_liquido TEXT")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS campos_ausentes_xml TEXT")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS irrf_calculado NUMERIC")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS csrf_calculado NUMERIC")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS iss_calculado NUMERIC")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS observacao_interna TEXT")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS status_fila_manual TEXT")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS prioridade_manual TEXT")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS responsavel TEXT")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT now()")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_nfse_notas_cert_chave ON nfse_notas (cert_alias, chave_nfse)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_notas_processo ON nfse_notas (processo_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_notas_tipo_nota ON nfse_notas (tipo_nota)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_notas_status_fila_manual ON nfse_notas (status_fila_manual)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_notas_responsavel ON nfse_notas (responsavel)")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS nfse_processo_notas (
           processo_id UUID NOT NULL,
@@ -87,24 +116,21 @@ def garantir_schema_nfse_notas():
         )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_processo_notas_nota ON nfse_processo_notas (nota_id)")
-        conn.execute(
-            """
-            UPDATE nfse_notas
-            SET status_base_calculo = CASE
-                    WHEN valor_bc IS NULL THEN 'ausente'
-                    WHEN valor_bc < -0.01 THEN 'divergente'
-                    WHEN valor_total IS NOT NULL AND valor_bc > valor_total + 0.01 THEN 'divergente'
-                    ELSE 'ok'
-                END,
-                updated_at = now()
-            WHERE status_base_calculo IS DISTINCT FROM CASE
-                    WHEN valor_bc IS NULL THEN 'ausente'
-                    WHEN valor_bc < -0.01 THEN 'divergente'
-                    WHEN valor_total IS NOT NULL AND valor_bc > valor_total + 0.01 THEN 'divergente'
-                    ELSE 'ok'
-                END
-            """
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS nfse_regras_atribuicao (
+          id BIGSERIAL PRIMARY KEY,
+          campo TEXT NOT NULL,
+          operador TEXT NOT NULL,
+          valor TEXT NOT NULL,
+          responsavel TEXT NOT NULL,
+          prioridade INTEGER NOT NULL DEFAULT 100,
+          ativo BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMP NOT NULL DEFAULT now(),
+          updated_at TIMESTAMP NOT NULL DEFAULT now()
         )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_regras_atribuicao_ativo ON nfse_regras_atribuicao (ativo)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nfse_regras_atribuicao_prioridade ON nfse_regras_atribuicao (prioridade)")
 
 
 def _to_text_alertas(value: Any) -> Optional[str]:
@@ -126,6 +152,144 @@ def _to_text_alertas(value: Any) -> Optional[str]:
         return " | ".join(partes) if partes else None
     txt = str(value).strip()
     return txt or None
+
+
+def _clean_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    txt = str(value).strip()
+    return txt or None
+
+
+def _normalize_rule_text(value: Any) -> str:
+    txt = str(value or "").strip().lower()
+    txt = unicodedata.normalize("NFD", txt)
+    txt = "".join(ch for ch in txt if unicodedata.category(ch) != "Mn")
+    return txt
+
+
+def _extract_rule_field_value(campo: str, cert_alias: str, data: dict) -> str:
+    mapping = {
+        "descricao_servico": data.get("Descrição do Serviço") or data.get("descricao_servico") or "",
+        "item_nfse": data.get("Descrição do Serviço") or data.get("descricao_servico") or "",
+        "razao_social": data.get("Razão Social") or data.get("razao_social") or "",
+        "fornecedor": data.get("Razão Social") or data.get("razao_social") or "",
+        "parte_exibicao_nome": data.get("Razão Social") or data.get("razao_social") or "",
+        "cert_alias": cert_alias or "",
+        "codigo_servico": data.get("Código de serviço") or data.get("codigo_servico") or "",
+    }
+    return str(mapping.get(campo, "") or "")
+
+
+def _rule_matches(campo_valor: str, operador: str, valor: str) -> bool:
+    source = _normalize_rule_text(campo_valor)
+    target = _normalize_rule_text(valor)
+    if not target:
+        return False
+    if operador == "equals":
+        return source == target
+    if operador == "starts_with":
+        return source.startswith(target)
+    return target in source
+
+
+def listar_regras_atribuicao() -> List[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, campo, operador, valor, responsavel, prioridade, ativo, created_at, updated_at
+            FROM nfse_regras_atribuicao
+            ORDER BY prioridade ASC, id ASC
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _listar_regras_ativas() -> List[dict]:
+    return [r for r in listar_regras_atribuicao() if r.get("ativo")]
+
+
+def criar_regra_atribuicao(campo: str, operador: str, valor: str, responsavel: str, prioridade: int = 100, ativo: bool = True) -> dict:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO nfse_regras_atribuicao (campo, operador, valor, responsavel, prioridade, ativo, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, now())
+            RETURNING id, campo, operador, valor, responsavel, prioridade, ativo, created_at, updated_at
+            """,
+            (_clean_text(campo), _clean_text(operador), _clean_text(valor), _clean_text(responsavel), prioridade, bool(ativo)),
+        ).fetchone()
+    return dict(row)
+
+
+def atualizar_regra_atribuicao(regra_id: int, campo: str, operador: str, valor: str, responsavel: str, prioridade: int, ativo: bool) -> Optional[dict]:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            UPDATE nfse_regras_atribuicao
+            SET campo = %s,
+                operador = %s,
+                valor = %s,
+                responsavel = %s,
+                prioridade = %s,
+                ativo = %s,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id, campo, operador, valor, responsavel, prioridade, ativo, created_at, updated_at
+            """,
+            (_clean_text(campo), _clean_text(operador), _clean_text(valor), _clean_text(responsavel), prioridade, bool(ativo), regra_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def excluir_regra_atribuicao(regra_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("DELETE FROM nfse_regras_atribuicao WHERE id = %s RETURNING id", (regra_id,)).fetchone()
+    return bool(row)
+
+
+def resolver_responsavel_automatico(cert_alias: str, data: dict) -> Optional[str]:
+    regras = _listar_regras_ativas()
+    for regra in regras:
+        campo = str(regra.get("campo") or "")
+        operador = str(regra.get("operador") or "contains")
+        valor = str(regra.get("valor") or "")
+        campo_valor = _extract_rule_field_value(campo, cert_alias, data)
+        if _rule_matches(campo_valor, operador, valor):
+            return _clean_text(regra.get("responsavel"))
+    return None
+
+
+def reaplicar_regras_atribuicao(only_empty: bool = True) -> int:
+    regras = _listar_regras_ativas()
+    if not regras:
+        return 0
+
+    with get_conn() as conn:
+        sql = """
+            SELECT id, cert_alias, responsavel, dados_completos
+            FROM nfse_notas
+        """
+        if only_empty:
+            sql += " WHERE COALESCE(TRIM(responsavel), '') = ''"
+        rows = conn.execute(sql).fetchall()
+
+        atualizados = 0
+        for row in rows:
+            data = row["dados_completos"] or {}
+            novo_responsavel = None
+            for regra in regras:
+                campo_valor = _extract_rule_field_value(str(regra.get("campo") or ""), str(row["cert_alias"] or ""), data)
+                if _rule_matches(campo_valor, str(regra.get("operador") or "contains"), str(regra.get("valor") or "")):
+                    novo_responsavel = _clean_text(regra.get("responsavel"))
+                    break
+            if novo_responsavel:
+                conn.execute(
+                    "UPDATE nfse_notas SET responsavel = %s, updated_at = now() WHERE id = %s",
+                    (novo_responsavel, row["id"]),
+                )
+                atualizados += 1
+    return atualizados
 
 
 def _extract_row_id(row: Any) -> Optional[int]:
@@ -247,7 +411,6 @@ def _build_campos_ausentes_xml(data: dict) -> Optional[str]:
 
 def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arquivo_origem: str | None = None) -> str:
     tipo_nota = "tomados"
-    arquivo_origem = arquivo_origem or data.get("_arquivo_origem") or data.get("_Arquivo_Origem")
 
     if processo_id:
         with get_conn() as conn:
@@ -291,10 +454,14 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
         )
 
     status_valor_liquido = _status_compare(valor_liquido, valor_liquido_correto)
-    status_base_calculo  = compute_base_calculation_status(valor_bc, valor_total)
+    status_base_calculo  = _status_compare(valor_bc, valor_total)
 
     campos_ausentes_xml  = _build_campos_ausentes_xml(data)
     alertas_fiscais_txt  = _to_text_alertas(data.get("Alertas Fiscais"))
+    irrf_calculado       = _to_decimal(data.get("_IRRF_Calculado"))
+    csrf_calculado       = _to_decimal(data.get("_CSRF_Calculado"))
+    iss_calculado        = _to_decimal(data.get("_ISS_Calculado"))
+    responsavel_automatico = resolver_responsavel_automatico(cert_alias, data)
 
     with get_conn() as conn:
         row = conn.execute(
@@ -311,6 +478,8 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               simples_xml, consulta_simples_api,
               status_simples_nacional, status_csrf, status_irrf, status_inss, status_base_calculo, status_valor_liquido,
               campos_ausentes_xml, alertas_fiscais,
+              irrf_calculado, csrf_calculado, iss_calculado,
+              responsavel,
               dados_completos, arquivo_origem,
               updated_at
             )
@@ -325,6 +494,8 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               %s,%s,
               %s,%s,%s,%s,%s,%s,
               %s,%s,
+              %s,%s,%s,
+              %s,
               %s,%s,
               now()
             )
@@ -366,6 +537,10 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               status_valor_liquido = EXCLUDED.status_valor_liquido,
               campos_ausentes_xml = EXCLUDED.campos_ausentes_xml,
               alertas_fiscais = EXCLUDED.alertas_fiscais,
+              irrf_calculado = EXCLUDED.irrf_calculado,
+              csrf_calculado = EXCLUDED.csrf_calculado,
+              iss_calculado = EXCLUDED.iss_calculado,
+              responsavel = COALESCE(NULLIF(nfse_notas.responsavel, ''), EXCLUDED.responsavel),
               dados_completos = EXCLUDED.dados_completos,
               arquivo_origem = COALESCE(EXCLUDED.arquivo_origem, nfse_notas.arquivo_origem),
               updated_at = now()
@@ -387,6 +562,8 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
                 data.get("Status IRRF"), data.get("Status INSS"),
                 status_base_calculo, status_valor_liquido,
                 campos_ausentes_xml, alertas_fiscais_txt,
+                irrf_calculado, csrf_calculado, iss_calculado,
+                responsavel_automatico,
                 Jsonb(data), arquivo_origem,
             ),
         ).fetchone()
@@ -409,15 +586,27 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
     return chave_nfse
 
 
-def atualizar_nota_campos_editaveis(nota_id: int, valor_liquido_correto: Optional[float], alertas_fiscais: Optional[str]) -> bool:
+def atualizar_nota_campos_editaveis(
+    nota_id: int,
+    valor_liquido_correto: Optional[float],
+    alertas_fiscais: Optional[str],
+    observacao_interna: Optional[str] = None,
+    status_fila_manual: Optional[str] = None,
+    prioridade_manual: Optional[str] = None,
+    responsavel: Optional[str] = None,
+) -> bool:
     """
-    Permite ao portal sobrescrever apenas os campos editáveis pelo auditor:
-    valor_liquido_correto e alertas_fiscais.
+    Permite ao portal sobrescrever apenas os campos editáveis pelo auditor.
     Recalcula status_valor_liquido automaticamente após a edição.
     """
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT valor_liquido, valor_liquido_correto FROM nfse_notas WHERE id = %s",
+            """
+            SELECT valor_liquido, valor_liquido_correto, alertas_fiscais,
+                   observacao_interna, status_fila_manual, prioridade_manual, responsavel
+            FROM nfse_notas
+            WHERE id = %s
+            """,
             (nota_id,)
         ).fetchone()
 
@@ -427,45 +616,28 @@ def atualizar_nota_campos_editaveis(nota_id: int, valor_liquido_correto: Optiona
         novo_correto = valor_liquido_correto if valor_liquido_correto is not None else row["valor_liquido_correto"]
         valor_liquido = row["valor_liquido"]
         novo_status = _status_compare(valor_liquido, novo_correto)
+        novos_alertas = alertas_fiscais if alertas_fiscais is not None else row["alertas_fiscais"]
+        nova_obs = observacao_interna if observacao_interna is not None else row["observacao_interna"]
+        novo_status_fila_manual = _clean_text(status_fila_manual) if status_fila_manual is not None else row["status_fila_manual"]
+        nova_prioridade = _clean_text(prioridade_manual) if prioridade_manual is not None else row["prioridade_manual"]
+        novo_responsavel = _clean_text(responsavel) if responsavel is not None else row["responsavel"]
 
         conn.execute(
             """
             UPDATE nfse_notas
             SET valor_liquido_correto = %s,
                 alertas_fiscais = %s,
+                observacao_interna = %s,
+                status_fila_manual = %s,
+                prioridade_manual = %s,
+                responsavel = %s,
                 status_valor_liquido = %s,
                 updated_at = now()
             WHERE id = %s
             """,
-            (novo_correto, alertas_fiscais, novo_status, nota_id),
+            (novo_correto, novos_alertas, nova_obs, novo_status_fila_manual, nova_prioridade, novo_responsavel, novo_status, nota_id),
         )
     return True
-
-
-def obter_nota_por_id(nota_id: int) -> Optional[Dict[str, Any]]:
-    with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT
-                n.id,
-                n.cert_alias,
-                COALESCE(ppn.processo_id, n.processo_id) AS processo_id,
-                n.chave_nfse,
-                n.numero_documento,
-                n.arquivo_origem,
-                n.competencia,
-                n.data_emissao,
-                n.updated_at
-            FROM nfse_notas n
-            LEFT JOIN nfse_processo_notas ppn ON ppn.nota_id = n.id
-            WHERE n.id = %s
-            ORDER BY ppn.created_at DESC NULLS LAST
-            LIMIT 1
-            """,
-            (nota_id,),
-        ).fetchone()
-
-    return dict(row) if row else None
 
 
 def _build_where(filters: Optional[dict], processo_id: Optional[str] = None) -> Tuple[str, List[Any]]:
@@ -481,7 +653,7 @@ def _build_where(filters: Optional[dict], processo_id: Optional[str] = None) -> 
     if filters:
         status = filters.get("status")
         if status:
-            where_clauses.append(f"{STATUS_EXPR} = %s")
+            where_clauses.append(f"{STATUS_FILA_EXPR} = %s")
             params.append(status)
 
         municipio = filters.get("municipio")
@@ -504,13 +676,29 @@ def _build_where(filters: Optional[dict], processo_id: Optional[str] = None) -> 
             where_clauses.append("n.codigo_servico = %s")
             params.append(codigo_servico)
 
+        data_tipo = filters.get("data_tipo") or "entrada"
+        data_inicio = filters.get("data_inicio")
+        data_fim = filters.get("data_fim")
+        if data_inicio:
+            if data_tipo == "emissao":
+                where_clauses.append("n.data_emissao >= %s")
+            else:
+                where_clauses.append("DATE(n.created_at) >= %s")
+            params.append(data_inicio)
+        if data_fim:
+            if data_tipo == "emissao":
+                where_clauses.append("n.data_emissao <= %s")
+            else:
+                where_clauses.append("DATE(n.created_at) <= %s")
+            params.append(data_fim)
+
         cert_alias = filters.get("cert_alias")
         if cert_alias:
             where_clauses.append("n.cert_alias = %s")
             params.append(cert_alias)
 
         if filters.get("somente_divergentes"):
-            where_clauses.append(f"{STATUS_EXPR} = 'divergente'")
+            where_clauses.append(f"{STATUS_FILA_EXPR} = 'divergente'")
 
     where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return where, params
@@ -553,7 +741,11 @@ def listar_notas_por_processo(
                    n.valor_liquido,
                    n.valor_liquido_correto,
                    n.status_valor_liquido,
+                   n.irrf_calculado,
+                   n.csrf_calculado,
+                   n.iss_calculado,
                    {STATUS_EXPR} as status,
+                   {STATUS_FILA_EXPR} as status_fila,
                    n.campos_ausentes_xml,
                    n.incidencia_iss,
                    n.data_pagamento,
@@ -570,6 +762,10 @@ def listar_notas_por_processo(
                    n.status_inss,
                    n.status_base_calculo,
                    n.alertas_fiscais,
+                   n.observacao_interna,
+                   n.status_fila_manual,
+                   n.prioridade_manual,
+                   n.responsavel,
                    n.created_at as dia_processado,
                    n.updated_at
             FROM nfse_notas n
@@ -612,16 +808,7 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    COALESCE(n.parte_exibicao_doc, n.cnpj_prestador, '—') as parte_exibicao_doc,
                    n.valor_total,
                    n.valor_bc as valor_base,
-                   n.csrf,
                    n.percentual_irrf,
-                   n.valor_liquido,
-                   n.valor_liquido_correto,
-                   n.status_valor_liquido,
-                   n.irrf,
-                   n.iss,
-                   n.inss,
-                   {STATUS_EXPR} as status,
-                   n.campos_ausentes_xml,
                    n.incidencia_iss,
                    n.data_pagamento,
                    n.codigo_servico,
@@ -636,11 +823,35 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    n.status_irrf,
                    n.status_inss,
                    n.status_base_calculo,
+                   n.valor_liquido,
+                   n.valor_liquido_correto,
+                   n.status_valor_liquido,
+                   n.csrf,
+                   n.irrf,
+                   n.iss,
+                   n.inss,
+                   n.irrf_calculado,
+                   n.csrf_calculado,
+                   n.iss_calculado,
+                   {STATUS_EXPR} as status,
+                   {STATUS_FILA_EXPR} as status_fila,
+                   n.campos_ausentes_xml,
                    n.alertas_fiscais,
+                   n.observacao_interna,
+                   n.status_fila_manual,
+                   n.prioridade_manual,
+                   n.responsavel,
                    n.created_at as dia_processado,
+                   n.created_at,
                    n.updated_at
             FROM nfse_notas n
-            LEFT JOIN nfse_processo_notas ppn ON ppn.nota_id = n.id
+            LEFT JOIN LATERAL (
+                SELECT ppn.processo_id
+                FROM nfse_processo_notas ppn
+                WHERE ppn.nota_id = n.id
+                ORDER BY ppn.created_at DESC, ppn.processo_id DESC
+                LIMIT 1
+            ) ppn ON TRUE
             LEFT JOIN nfse_processos p ON p.id = COALESCE(ppn.processo_id, n.processo_id)
             {where}
             ORDER BY n.updated_at DESC, n.created_at DESC
@@ -684,3 +895,170 @@ def obter_resumo_processo(processo_id: str) -> Dict[str, Any]:
     resumo["principais_codigos_servico"] = []
     resumo["principais_alertas"]       = []
     return resumo
+
+
+def backfill_comparativo_tributos(limit: Optional[int] = None) -> int:
+    from .nfse_xml_converter import NFSeXMLConverter
+
+    conv = NFSeXMLConverter(tipo_nota="tomados")
+    limit_sql = ""
+    params: List[Any] = []
+    if limit is not None and limit > 0:
+        limit_sql = "LIMIT %s"
+        params.append(limit)
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, codigo_servico, valor_total, valor_bc, iss, simples_xml
+            FROM nfse_notas
+            WHERE irrf_calculado IS NULL
+               OR csrf_calculado IS NULL
+               OR iss_calculado IS NULL
+            ORDER BY id
+            {limit_sql}
+            """,
+            params,
+        ).fetchall()
+
+        atualizados = 0
+        for row in rows:
+            valor_total = float(row["valor_total"] or 0)
+            valor_bc = float(row["valor_bc"] or 0)
+            base_calculo = valor_bc if valor_bc > 0 else valor_total
+            dados = {
+                "Valor Total": valor_total,
+                "Valor B/C": valor_bc,
+                "Simples Nacional / XML": row["simples_xml"] or "",
+            }
+            comparativo = conv.aplicar_regras_retencao(dados, row["codigo_servico"]) or {}
+            categoria = conv._categoria_simples(row["simples_xml"] or "")
+
+            irrf_calculado = comparativo.get("irrf_esperado")
+            csrf_calculado = comparativo.get("csrf_esperado")
+            iss_calculado = float(row["iss"] or 0)
+
+            if categoria in ("MEI", "OPTANTE") or base_calculo == 0:
+                irrf_calculado = 0.0
+                csrf_calculado = 0.0
+
+            conn.execute(
+                """
+                UPDATE nfse_notas
+                SET irrf_calculado = %s,
+                    csrf_calculado = %s,
+                    iss_calculado = %s
+                WHERE id = %s
+                """,
+                (
+                    irrf_calculado if irrf_calculado is not None else 0.0,
+                    csrf_calculado if csrf_calculado is not None else 0.0,
+                    iss_calculado,
+                    row["id"],
+                ),
+            )
+            atualizados += 1
+
+    return atualizados
+
+
+def _normalize_file_key(value: Any) -> str:
+    txt = str(value or "").strip().lower()
+    txt = unicodedata.normalize("NFD", txt)
+    txt = "".join(ch for ch in txt if unicodedata.category(ch) != "Mn")
+    txt = re.sub(r"[^a-z0-9]+", "", txt)
+    return txt
+
+
+def _digits_only(value: Any) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def _score_arquivo_para_nota(row: dict, tipo_arquivo: str, arquivo_origem_nome: str, arquivo_origem_stem: str, numero_documento: str, chave_nfse: str) -> int:
+    nome = str(row.get("nome_arquivo") or "")
+    stem = Path(nome).stem
+    nome_norm = _normalize_file_key(nome)
+    stem_norm = _normalize_file_key(stem)
+    digits_nome = _digits_only(nome)
+
+    score = 0
+    if arquivo_origem_nome and nome.lower() == arquivo_origem_nome.lower():
+        score = max(score, 120 if tipo_arquivo == "xml" else 95)
+    if arquivo_origem_stem and stem.lower() == arquivo_origem_stem.lower():
+        score = max(score, 115 if tipo_arquivo == "xml" else 100)
+    if arquivo_origem_stem and arquivo_origem_stem in stem_norm:
+        score = max(score, 90)
+    if numero_documento and numero_documento in digits_nome:
+        score = max(score, 70)
+    if chave_nfse and len(chave_nfse) >= 8 and chave_nfse in digits_nome:
+        score = max(score, 80)
+    if arquivo_origem_nome and _normalize_file_key(arquivo_origem_nome) in nome_norm:
+        score = max(score, 85)
+    return score
+
+
+def localizar_documentos_nota(nota_id: int) -> dict:
+    garantir_schema_nfse_notas()
+    with get_conn() as conn:
+        nota = conn.execute(
+            """
+            SELECT
+              n.id,
+              COALESCE(ppn.processo_id, n.processo_id) AS processo_id,
+              n.numero_documento,
+              n.chave_nfse,
+              n.arquivo_origem,
+              n.dados_completos
+            FROM nfse_notas n
+            LEFT JOIN LATERAL (
+              SELECT ppn.processo_id
+              FROM nfse_processo_notas ppn
+              WHERE ppn.nota_id = n.id
+              ORDER BY ppn.created_at DESC, ppn.processo_id DESC
+              LIMIT 1
+            ) ppn ON TRUE
+            WHERE n.id = %s
+            """,
+            (nota_id,),
+        ).fetchone()
+        if not nota:
+            return {"nota_id": nota_id, "processo_id": None, "xml": None, "pdf": None}
+
+        processo_id = str(nota["processo_id"]) if nota["processo_id"] else None
+        if not processo_id:
+            return {"nota_id": nota_id, "processo_id": None, "xml": None, "pdf": None}
+
+        arquivos = conn.execute(
+            """
+            SELECT id, processo_id, tipo_arquivo, nome_arquivo, storage_key, caminho_local, content_type, tamanho_bytes, competencia, created_at
+            FROM nfse_processo_arquivos
+            WHERE processo_id = %s
+              AND tipo_arquivo IN ('xml', 'pdf')
+            ORDER BY created_at DESC, id DESC
+            """,
+            (processo_id,),
+        ).fetchall()
+
+    dados = nota["dados_completos"] or {}
+    arquivo_origem_nome = Path(str(nota["arquivo_origem"] or "")).name
+    arquivo_origem_stem = _normalize_file_key(Path(arquivo_origem_nome).stem) if arquivo_origem_nome else ""
+    numero_documento = _digits_only(nota["numero_documento"] or dados.get("N° Documento") or dados.get("Nº Documento"))
+    chave_nfse = _digits_only(nota["chave_nfse"] or dados.get("Chave de Acesso"))
+
+    best = {"xml": None, "pdf": None}
+    best_score = {"xml": -1, "pdf": -1}
+
+    for row in arquivos:
+        item = dict(row)
+        tipo = str(item.get("tipo_arquivo") or "")
+        score = _score_arquivo_para_nota(item, tipo, arquivo_origem_nome, arquivo_origem_stem, numero_documento, chave_nfse)
+        if score > best_score.get(tipo, -1):
+            best[tipo] = item
+            best_score[tipo] = score
+
+    return {
+        "nota_id": nota_id,
+        "processo_id": processo_id,
+        "xml": best["xml"],
+        "pdf": best["pdf"],
+    }

@@ -42,20 +42,27 @@ from modules.execucoes_repo import (
     listar_execucoes,
     garantir_schema_nfse_execucoes,
 )
-from modules.arquivos_repo import listar_arquivos_processo, obter_arquivo_processo, localizar_documento_nota
+from modules.arquivos_repo import listar_arquivos_processo, obter_arquivo_processo
 from modules.notas_repo import (
+    garantir_schema_nfse_notas,
     listar_notas_por_processo,
     obter_resumo_processo,
     listar_notas_agrupadas,
     atualizar_nota_campos_editaveis,
-    obter_nota_por_id,
+    listar_regras_atribuicao,
+    criar_regra_atribuicao,
+    atualizar_regra_atribuicao,
+    excluir_regra_atribuicao,
+    reaplicar_regras_atribuicao,
+    localizar_documentos_nota,
 )
 from modules.runner_processos import run_with_process, ProcessRunConfig, RunConfig
 from modules.storage import is_s3_configured, generate_presigned_download_url, limpar_arquivos_antigos_minio
 from modules.schemas import (
     StatusEnum, LoginTypeEnum, TipoNotaEnum, Pagination,
     ProcessoResponse, ArquivoResponse, NotaReportFilters,
-    NotaReportRow, SummaryResponse, ProcessoCreate, NotaDocumentosResponse,
+    NotaReportRow, SummaryResponse, ProcessoCreate, NotaDocumentosResponse, NotaDocumentoItem,
+    RegraAtribuicaoCreate, RegraAtribuicaoUpdate, RegraAtribuicaoResponse,
 )
 from modules.reports import gerar_relatorio_processo
 from modules.db import get_conn, ensure_database_extensions
@@ -137,6 +144,10 @@ class SenhaUpdate(BaseModel):
 class NotaEditRequest(BaseModel):
     valor_liquido_correto: Optional[float] = None
     alertas_fiscais: Optional[str] = None
+    observacao_interna: Optional[str] = None
+    status_fila_manual: Optional[str] = None
+    prioridade_manual: Optional[str] = None
+    responsavel: Optional[str] = None
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -250,6 +261,7 @@ def startup_event():
         ensure_directories()
         _log_runtime_storage_info()
         ensure_database_extensions()
+        garantir_schema_nfse_notas()
         garantir_schema_nfse_execucoes()
     except Exception as exc:
         raise RuntimeError(f"Falha crítica no startup da API: {exc}") from exc
@@ -746,6 +758,9 @@ def get_nfse(
     cnpj_cpf: Optional[str] = Query(None),
     competencia: Optional[str] = Query(None),
     codigo_servico: Optional[str] = Query(None),
+    data_tipo: Optional[str] = Query(None),
+    data_inicio: Optional[str] = Query(None),
+    data_fim: Optional[str] = Query(None),
     somente_divergentes: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(200, ge=1, le=500),
@@ -754,9 +769,57 @@ def get_nfse(
         "cert_alias": cert_alias, "status": status, "municipio": municipio,
         "cnpj_cpf": cnpj_cpf, "competencia": competencia,
         "codigo_servico": codigo_servico, "somente_divergentes": somente_divergentes,
+        "data_tipo": data_tipo, "data_inicio": data_inicio, "data_fim": data_fim,
     }
     items, total = listar_notas_agrupadas(filters, page=page, page_size=page_size)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/fila-regras-atribuicao", response_model=list[RegraAtribuicaoResponse])
+def get_fila_regras_atribuicao():
+    return listar_regras_atribuicao()
+
+
+@app.post("/fila-regras-atribuicao", response_model=RegraAtribuicaoResponse)
+def post_fila_regra_atribuicao(data: RegraAtribuicaoCreate):
+    return criar_regra_atribuicao(
+        campo=data.campo,
+        operador=data.operador,
+        valor=data.valor,
+        responsavel=data.responsavel,
+        prioridade=data.prioridade,
+        ativo=data.ativo,
+    )
+
+
+@app.put("/fila-regras-atribuicao/{regra_id}", response_model=RegraAtribuicaoResponse)
+def put_fila_regra_atribuicao(regra_id: int, data: RegraAtribuicaoUpdate):
+    row = atualizar_regra_atribuicao(
+        regra_id=regra_id,
+        campo=data.campo,
+        operador=data.operador,
+        valor=data.valor,
+        responsavel=data.responsavel,
+        prioridade=data.prioridade,
+        ativo=data.ativo,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Regra {regra_id} não encontrada")
+    return row
+
+
+@app.delete("/fila-regras-atribuicao/{regra_id}")
+def delete_fila_regra_atribuicao(regra_id: int):
+    ok = excluir_regra_atribuicao(regra_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Regra {regra_id} não encontrada")
+    return {"success": True, "id": regra_id}
+
+
+@app.post("/fila-regras-atribuicao/reaplicar")
+def post_fila_regras_reaplicar(somente_sem_responsavel: bool = Query(True)):
+    atualizadas = reaplicar_regras_atribuicao(only_empty=somente_sem_responsavel)
+    return {"success": True, "atualizadas": atualizadas}
 
 
 @app.put("/nfse/{nota_id}")
@@ -772,64 +835,42 @@ def atualizar_nota(nota_id: int, data: NotaEditRequest):
         nota_id=nota_id,
         valor_liquido_correto=data.valor_liquido_correto,
         alertas_fiscais=data.alertas_fiscais,
+        observacao_interna=data.observacao_interna,
+        status_fila_manual=data.status_fila_manual,
+        prioridade_manual=data.prioridade_manual,
+        responsavel=data.responsavel,
     )
     if not ok:
         raise HTTPException(status_code=404, detail=f"Nota {nota_id} não encontrada")
     return {"success": True, "nota_id": nota_id}
 
 
-def _montar_link_documento(arq: Optional[ArquivoResponse]) -> Optional[dict]:
-    if not arq:
+def _serialize_nota_documento(item: dict | None) -> Optional[NotaDocumentoItem]:
+    if not item:
         return None
-
-    route = f"/processos/{arq.processo_id}/arquivos/{arq.id}/download"
-    tipo = arq.tipo_arquivo.value if hasattr(arq.tipo_arquivo, "value") else str(arq.tipo_arquivo)
-    return {
-        "arquivo_id": arq.id,
-        "processo_id": arq.processo_id,
-        "tipo": tipo,
-        "nome_arquivo": arq.nome_arquivo,
-        "content_type": arq.content_type,
-        "tamanho_bytes": arq.tamanho_bytes,
-        "storage_key": arq.storage_key,
-        "view_url": route,
-        "download_url": route,
-    }
+    processo_id = str(item.get("processo_id"))
+    arquivo_id = int(item.get("id"))
+    return NotaDocumentoItem(
+        id=arquivo_id,
+        processo_id=processo_id,
+        tipo_arquivo=item.get("tipo_arquivo"),
+        nome_arquivo=item.get("nome_arquivo"),
+        content_type=item.get("content_type"),
+        view_url=f"/processos/{processo_id}/arquivos/{arquivo_id}/view",
+        download_url=f"/processos/{processo_id}/arquivos/{arquivo_id}/download",
+    )
 
 
 @app.get("/nfse/{nota_id}/documentos", response_model=NotaDocumentosResponse)
 def get_nfse_documentos(nota_id: int):
-    nota = obter_nota_por_id(nota_id)
-    if not nota:
-        raise HTTPException(status_code=404, detail="Nota nÃ£o encontrada")
-
-    xml = localizar_documento_nota(
-        "xml",
-        processo_id=nota.get("processo_id"),
-        arquivo_origem=nota.get("arquivo_origem"),
-        numero_documento=nota.get("numero_documento"),
-        chave_nfse=nota.get("chave_nfse"),
-    )
-    pdf = localizar_documento_nota(
-        "pdf",
-        processo_id=nota.get("processo_id"),
-        arquivo_origem=nota.get("arquivo_origem"),
-        numero_documento=nota.get("numero_documento"),
-        chave_nfse=nota.get("chave_nfse"),
+    docs = localizar_documentos_nota(nota_id)
+    return NotaDocumentosResponse(
+        nota_id=nota_id,
+        processo_id=docs.get("processo_id"),
+        xml=_serialize_nota_documento(docs.get("xml")),
+        pdf=_serialize_nota_documento(docs.get("pdf")),
     )
 
-    return {
-        "nota_id": nota_id,
-        "processo_id": str(nota.get("processo_id")) if nota.get("processo_id") else None,
-        "numero_documento": nota.get("numero_documento"),
-        "chave_nfse": nota.get("chave_nfse"),
-        "arquivo_origem": nota.get("arquivo_origem"),
-        "xml": _montar_link_documento(xml),
-        "pdf": _montar_link_documento(pdf),
-    }
-
-
-# ─── Processos ────────────────────────────────────────────────────────────────
 
 @app.get("/processos", response_model=dict)
 def get_processos(
@@ -923,20 +964,30 @@ def get_relatorio_processo(processo_id: str):
 @app.get("/processos/{processo_id}/arquivos/{arquivo_id}/download")
 def download_arquivo(processo_id: str, arquivo_id: int):
     arq = obter_arquivo_processo(arquivo_id)
-    if not arq or arq.processo_id != processo_id:
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    return _arquivo_redirect_or_file(arq, processo_id, inline=False)
 
-    # Tenta MinIO primeiro
+
+@app.get("/processos/{processo_id}/arquivos/{arquivo_id}/view")
+def view_arquivo(processo_id: str, arquivo_id: int):
+    arq = obter_arquivo_processo(arquivo_id)
+    return _arquivo_redirect_or_file(arq, processo_id, inline=True)
+
+
+def _arquivo_redirect_or_file(arq, processo_id: str, inline: bool = False):
+    if not arq or arq.processo_id != processo_id:
+        raise HTTPException(status_code=404, detail="Arquivo n?o encontrado")
+
     if arq.storage_key and is_s3_configured():
         url = generate_presigned_download_url(arq.storage_key)
         if url:
             return RedirectResponse(url)
 
-    # Fallback: arquivo local
     if arq.caminho_local and Path(arq.caminho_local).exists():
+        if inline:
+            return FileResponse(arq.caminho_local, media_type=arq.content_type or None)
         return FileResponse(arq.caminho_local, filename=arq.nome_arquivo)
 
-    raise HTTPException(status_code=404, detail="Arquivo não disponível (não está no MinIO nem localmente)")
+    raise HTTPException(status_code=404, detail="Arquivo n?o dispon?vel (n?o est? no MinIO nem localmente)")
 
 
 def _buscar_conteudo_arquivo(arq) -> tuple:
