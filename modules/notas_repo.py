@@ -743,7 +743,6 @@ def listar_notas_por_processo(
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
                    {STATUS_EXIBICAO_EXPR} as status_exibicao,
-                   {STATUS_EXIBICAO_EXPR} as status_exibicao,
                    n.campos_ausentes_xml,
                    n.incidencia_iss,
                    n.data_pagamento,
