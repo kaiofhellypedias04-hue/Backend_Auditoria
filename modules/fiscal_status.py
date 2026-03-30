@@ -6,11 +6,7 @@ from typing import Any, Iterable
 OK_VALUES = {"", "ok", "correto", "sem divergencia", "sem divergência"}
 DIVERGENT_VALUES = {"divergente", "ausente", "erro", "inconsistente"}
 
-# Campos que definem a divergencia operacional/fiscal final.
-# Campos que definem a divergencia operacional/fiscal final.
-# Agora inclui status_base_calculo conforme regra de negócio atualizada.
 FINAL_STATUS_FIELDS = (
-    "status_simples_nacional",
     "status_csrf",
     "status_irrf",
     "status_inss",
@@ -68,4 +64,3 @@ def build_sql_status_expr(alias: str = "n") -> str:
       ELSE 'divergente'
     END
 )""".format(conditions="\n       AND ".join(conditions))
-

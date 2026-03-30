@@ -314,63 +314,33 @@ def _extract_total(total_row: Any) -> int:
 
 
 def _to_decimal(v: Any) -> Optional[float]:
-    """
-    Converte valor monetário para float, tratando corretamente os formatos:
-      - Formato BR com milhar: "3.821,61"  → 3821.61
-      - Formato BR sem milhar: "821,61"    → 821.61
-      - Formato US com ponto:  "3821.61"   → 3821.61
-      - Inteiro puro:          "3821"      → 3821.0
-      - Já é número:           3821.61     → 3821.61
-
-    CORREÇÃO CRÍTICA: a versão anterior removia TODOS os pontos antes de
-    trocar a vírgula, transformando "3821.61" em 382161. Agora detectamos
-    o formato correto antes de converter.
-    """
     if v in (None, ""):
         return None
 
-    # Se já é numérico, retorna direto
     if isinstance(v, (int, float)):
         return float(v)
 
     s = str(v).strip()
-
-    # Remove prefixos de moeda e espaços (R$, $, etc.)
     s = re.sub(r"[R$\s]+", "", s)
 
     if not s:
         return None
 
     try:
-        # Caso 1: formato BR com vírgula decimal "3.821,61" ou "821,61"
-        # Identificado pela presença de vírgula
         if "," in s:
-            # Remove pontos de milhar, troca vírgula por ponto
             s_clean = s.replace(".", "").replace(",", ".")
             return float(s_clean)
 
-        # Caso 2: formato com ponto — precisamos distinguir:
-        #   - Separador decimal US: "3821.61"  (ponto aparece uma vez, ≤2 dígitos após)
-        #   - Separador de milhar:  "3.821"    (ponto aparece, 3 dígitos após, sem decimais)
         if "." in s:
             partes = s.split(".")
-            # Se o último bloco tem exatamente 3 dígitos E há mais de um ponto
-            # → é separador de milhar europeu sem decimais ex: "1.234.567"
             if len(partes) > 2 and all(len(p) == 3 for p in partes[1:]):
                 return float(s.replace(".", ""))
-            # Se o último bloco tem 3 dígitos e só há 1 ponto → ambíguo,
-            # mas tratamos como separador de milhar (ex: "3.821" → 3821)
-            # APENAS se não há casas que indiquem decimal típico (1 ou 2 dígitos)
             last = partes[-1]
             if len(partes) == 2 and len(last) == 3 and last.isdigit():
-                # "3.821" → milhar → 3821
                 return float(s.replace(".", ""))
-            # Caso geral: ponto decimal normal "3821.61", "0.50"
             return float(s)
 
-        # Caso 3: número inteiro puro "3821"
         return float(s)
-
     except Exception:
         return None
 
@@ -381,10 +351,6 @@ def _status_compare(xml_value: Optional[float], expected_value: Optional[float],
     if expected_value is None:
         return "ok"
     return "ok" if abs(xml_value - expected_value) <= tolerance else "divergente"
-
-
-    faltantes = [campo for campo in campos_obrigatorios if data.get(campo) in (None, "")]
-    return " | ".join(faltantes) if faltantes else None
 
 
 def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arquivo_origem: str | None = None) -> str:
@@ -413,13 +379,13 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
 
     chave_nfse = gerar_chave_nfse(data)
 
-    valor_total   = _to_decimal(data.get("Valor Total"))
-    valor_bc      = _to_decimal(data.get("Valor B/C"))
+    valor_total = _to_decimal(data.get("Valor Total"))
+    valor_bc = _to_decimal(data.get("Valor B/C"))
     valor_liquido = _to_decimal(data.get("Valor Líquido"))
-    csrf          = _to_decimal(data.get("CSRF"))
-    irrf          = _to_decimal(data.get("IRRF"))
-    inss          = _to_decimal(data.get("INSS"))
-    iss           = _to_decimal(data.get("ISS"))
+    csrf = _to_decimal(data.get("CSRF"))
+    irrf = _to_decimal(data.get("IRRF"))
+    inss = _to_decimal(data.get("INSS"))
+    iss = _to_decimal(data.get("ISS"))
 
     valor_liquido_correto = None
     if valor_total is not None:
@@ -432,12 +398,12 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
         )
 
     status_valor_liquido = _status_compare(valor_liquido, valor_liquido_correto)
-    status_base_calculo  = _status_compare(valor_bc, valor_total)
+    status_base_calculo = _status_compare(valor_bc, valor_total)
 
-    alertas_fiscais_txt  = _to_text_alertas(data.get("Alertas Fiscais"))
-    irrf_calculado       = _to_decimal(data.get("_IRRF_Calculado"))
-    csrf_calculado       = _to_decimal(data.get("_CSRF_Calculado"))
-    iss_calculado        = _to_decimal(data.get("_ISS_Calculado"))
+    alertas_fiscais_txt = _to_text_alertas(data.get("Alertas Fiscais"))
+    irrf_calculado = _to_decimal(data.get("_IRRF_Calculado"))
+    csrf_calculado = _to_decimal(data.get("_CSRF_Calculado"))
+    iss_calculado = _to_decimal(data.get("_ISS_Calculado"))
     responsavel_automatico = resolver_responsavel_automatico(cert_alias, data)
 
     with get_conn() as conn:
@@ -470,8 +436,7 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               %s,%s,%s,%s,%s,
               %s,%s,
               %s,%s,%s,%s,%s,%s,
-              %s,%s,
-              %s,%s,%s,
+              %s,%s,%s,%s,%s,
               %s,
               %s,%s,
               now()
@@ -571,10 +536,6 @@ def atualizar_nota_campos_editaveis(
     prioridade_manual: Optional[str] = None,
     responsavel: Optional[str] = None,
 ) -> bool:
-    """
-    Permite ao portal sobrescrever apenas os campos editáveis pelo auditor.
-    Recalcula status_valor_liquido automaticamente após a edição.
-    """
     with get_conn() as conn:
         row = conn.execute(
             """
@@ -722,11 +683,7 @@ def listar_notas_por_processo(
                    n.iss_calculado,
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
-<<<<<<< HEAD
                    {STATUS_FILA_EXPR} as status_exibicao,
-                   n.campos_ausentes_xml,
-=======
->>>>>>> 78ef6d4 (ultimate)
                    n.incidencia_iss,
                    n.data_pagamento,
                    n.codigo_servico,
@@ -815,11 +772,7 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    n.iss_calculado,
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
-<<<<<<< HEAD
                    {STATUS_FILA_EXPR} as status_exibicao,
-                   n.campos_ausentes_xml,
-=======
->>>>>>> 78ef6d4 (ultimate)
                    n.alertas_fiscais,
                    n.observacao_interna,
                    n.status_fila_manual,
@@ -871,13 +824,13 @@ def obter_resumo_processo(processo_id: str) -> Dict[str, Any]:
         ).fetchone()
 
     resumo = dict(row or {})
-    resumo["total_notas"]              = resumo.get("total_notas") or 0
-    resumo["total_corretas"]           = resumo.get("total_corretas") or 0
-    resumo["total_divergentes"]        = resumo.get("total_divergentes") or 0
-    resumo["valor_total_processado"]   = resumo.get("valor_total_processado") or 0
-    resumo["principais_municipios"]    = []
+    resumo["total_notas"] = resumo.get("total_notas") or 0
+    resumo["total_corretas"] = resumo.get("total_corretas") or 0
+    resumo["total_divergentes"] = resumo.get("total_divergentes") or 0
+    resumo["valor_total_processado"] = resumo.get("valor_total_processado") or 0
+    resumo["principais_municipios"] = []
     resumo["principais_codigos_servico"] = []
-    resumo["principais_alertas"]       = []
+    resumo["principais_alertas"] = []
     return resumo
 
 
