@@ -163,7 +163,6 @@ class NotaReportRow(BaseModel):
     iss_calculado: Optional[float] = None
     status: Optional[str] = None
     status_fila: Optional[str] = None
-    campos_ausentes_xml: Optional[str] = None
     incidencia_iss: Optional[str] = None
     codigo_servico: Optional[str] = None
     codigo_nbs: Optional[str] = None

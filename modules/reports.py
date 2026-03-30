@@ -42,7 +42,7 @@ def gerar_relatorio_processo(processo_id: str) -> Dict[str, Any]:
             "parte_exibicao_doc": item.get("parte_exibicao_doc"),
             "valor_total": float(item.get("valor_total") or 0),
             "status": item.get("status"),
-            "observacao": item.get("campos_ausentes_xml") or item.get("alertas_fiscais") or "",
+            "observacao": item.get("alertas_fiscais") or "",
             "correcao_manual": "",  # future
             "competencia": item.get("competencia"),
             "codigo_servico": item.get("codigo_servico")

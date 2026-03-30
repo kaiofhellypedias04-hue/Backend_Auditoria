@@ -1103,7 +1103,6 @@ def download_relatorio_csv(processo_id: str):
         ("Valor Líquido",           "valor_liquido"),
         ("Valor Líquido Correto",   "valor_liquido_correto"),
         ("Status Valor Líquido",    "status_valor_liquido"),
-        ("Campos ausentes no XML",  "campos_ausentes_xml"),
         ("Incidência do ISS",       "incidencia_iss"),
         ("Data do pagamento",       "data_pagamento"),
         ("Código de serviço",       "codigo_servico"),
