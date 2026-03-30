@@ -7,13 +7,14 @@ OK_VALUES = {"", "ok", "correto", "sem divergencia", "sem divergência"}
 DIVERGENT_VALUES = {"divergente", "ausente", "erro", "inconsistente"}
 
 # Campos que definem a divergencia operacional/fiscal final.
-# Status Base de Calculo fica fora para nao marcar divergencia em casos
-# legitimos onde a base tributavel difere do valor total.
+# Campos que definem a divergencia operacional/fiscal final.
+# Agora inclui status_base_calculo conforme regra de negócio atualizada.
 FINAL_STATUS_FIELDS = (
     "status_simples_nacional",
     "status_csrf",
     "status_irrf",
     "status_inss",
+    "status_base_calculo",
     "status_valor_liquido",
 )
 

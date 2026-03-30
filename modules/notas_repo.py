@@ -9,19 +9,10 @@ from psycopg.types.json import Jsonb
 
 from .db import get_conn
 from .nfse_keys import gerar_chave_nfse
+from .fiscal_status import build_sql_status_expr
 
 
-STATUS_EXPR = """(
-    CASE
-      WHEN COALESCE(n.status_csrf, 'ok') = 'ok'
-       AND COALESCE(n.status_irrf, 'ok') = 'ok'
-       AND COALESCE(n.status_inss, 'ok') = 'ok'
-       AND COALESCE(n.status_base_calculo, 'ok') = 'ok'
-       AND COALESCE(n.status_valor_liquido, 'ok') = 'ok'
-      THEN 'correta'
-      ELSE 'divergente'
-    END
-)"""
+STATUS_EXPR = build_sql_status_expr("n")
 
 STATUS_FILA_EXPR = f"""COALESCE(NULLIF(n.status_fila_manual, ''), {STATUS_EXPR})"""
 
