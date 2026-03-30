@@ -15,7 +15,7 @@ from .fiscal_status import build_sql_status_expr
 STATUS_EXPR = build_sql_status_expr("n")
 
 STATUS_FILA_EXPR = f"""COALESCE(NULLIF(n.status_fila_manual, ''), {STATUS_EXPR})"""
-STATUS_EXIBICAO_EXPR = STATUS_FILA_EXPR
+STATUS_FILA_FILTER_EXPR = f"LOWER(BTRIM(COALESCE({STATUS_FILA_EXPR}, '')))"
 
 
 def garantir_schema_nfse_notas():
@@ -644,12 +644,8 @@ def _build_where(filters: Optional[dict], processo_id: Optional[str] = None) -> 
 
     if filters:
         status = filters.get("status")
-        status_exibicao = filters.get("status_exibicao") or filters.get("status_fila")
-        if status_exibicao:
-            where_clauses.append(f"{STATUS_EXIBICAO_EXPR} = %s")
-            params.append(status_exibicao)
-        elif status:
-            where_clauses.append(f"{STATUS_FILA_EXPR} = %s")
+        if status:
+            where_clauses.append(f"{STATUS_FILA_FILTER_EXPR} = LOWER(BTRIM(%s))")
             params.append(status)
 
         municipio = filters.get("municipio")
@@ -694,7 +690,7 @@ def _build_where(filters: Optional[dict], processo_id: Optional[str] = None) -> 
             params.append(cert_alias)
 
         if filters.get("somente_divergentes"):
-            where_clauses.append(f"{STATUS_FILA_EXPR} = 'divergente'")
+            where_clauses.append(f"{STATUS_FILA_FILTER_EXPR} = 'divergente'")
 
     where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     return where, params
@@ -742,7 +738,7 @@ def listar_notas_por_processo(
                    n.iss_calculado,
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
-                   {STATUS_EXIBICAO_EXPR} as status_exibicao,
+                   {STATUS_FILA_EXPR} as status_exibicao,
                    n.campos_ausentes_xml,
                    n.incidencia_iss,
                    n.data_pagamento,
@@ -832,6 +828,7 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    n.iss_calculado,
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
+                   {STATUS_FILA_EXPR} as status_exibicao,
                    n.campos_ausentes_xml,
                    n.alertas_fiscais,
                    n.observacao_interna,
@@ -871,8 +868,8 @@ def obter_resumo_processo(processo_id: str) -> Dict[str, Any]:
             f"""
             SELECT
                 COUNT(*) as total_notas,
-                COALESCE(SUM(CASE WHEN {STATUS_EXIBICAO_EXPR} = 'correta' THEN 1 ELSE 0 END), 0) as total_corretas,
-                COALESCE(SUM(CASE WHEN {STATUS_EXIBICAO_EXPR} = 'divergente' THEN 1 ELSE 0 END), 0) as total_divergentes,
+                COALESCE(SUM(CASE WHEN {STATUS_EXPR} = 'correta' THEN 1 ELSE 0 END), 0) as total_corretas,
+                COALESCE(SUM(CASE WHEN {STATUS_EXPR} = 'divergente' THEN 1 ELSE 0 END), 0) as total_divergentes,
                 COALESCE(SUM(n.valor_total), 0) as valor_total_processado
             FROM nfse_notas n
             WHERE EXISTS (
