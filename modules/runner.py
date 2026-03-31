@@ -7,19 +7,18 @@ import uuid
 import glob
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from .nfse_xml_converter import NFSeXMLConverterComAPI
 from .playwright_downloader import executar_fluxo_nfse_playwright
 from .downloader import distribuir_por_competencia, criar_estrutura_pastas
 from .spreadsheet import atualizar_planilha_incremental
-from .notas_repo import salvar_nota_nfse, gerar_chave_nfse, garantir_schema_nfse_notas, listar_notas_por_processo, obter_resumo_processo
-from .run_state_repo import get_state, upsert_state, garantir_schema_run_state
-from .processos_repo import garantir_schema_nfse_processos, criar_processo, atualizar_status_processo, atualizar_totais_processo
-from .arquivos_repo import garantir_schema_nfse_processo_arquivos, registrar_arquivo_processo
-from .storage import upload_pdf, upload_xml, upload_relatorio, is_s3_configured
-from .execucoes_repo import garantir_schema_nfse_execucoes, criar_execucao, atualizar_status_execucao
-import uuid
-from datetime import datetime
+from .notas_repo import (
+    salvar_nota_nfse,
+    gerar_chave_nfse,
+    garantir_schema_nfse_notas,
+)
+from .run_state_repo import upsert_state, garantir_schema_run_state
 
 
 @dataclass
@@ -52,13 +51,13 @@ def _chunk_ranges(start: date, end: date, chunk_days: int):
 
 def _resolver_intervalo_automatico(cfg: RunConfig, cert_alias: str) -> tuple[date, date]:
     """Resolve o intervalo automático para processamento.
-    
+
     Requisito 4: Sempre processar os ÚLTIMOS 30 DIAS.
     As datas já devem estar configuradas em cfg.start e cfg.end pelo main.py.
     Esta função apenas valida e retorna os valores.
     """
     hoje = date.today()
-    
+
     # Se cfg.start e cfg.end já estão definidos (últimos 30 dias), usar esses valores
     if cfg.start is not None and cfg.end is not None:
         start = cfg.start
@@ -67,19 +66,22 @@ def _resolver_intervalo_automatico(cfg: RunConfig, cert_alias: str) -> tuple[dat
         # Fallback: calcular últimos 30 dias se não definido
         end = hoje
         start = hoje - timedelta(days=29)
-    
+
     # Validação: não processar datas futuras
     if end > hoje:
         end = hoje
     if start > end:
         start = end
-        
+
     return start, end
 
 
-def run_processing(cfg: RunConfig, logger=None) -> None:
+def run_processing(cfg: RunConfig, logger=None) -> list[dict[str, Any]]:
     """Orquestra execução manual (GUI) e automática (CLI) sem depender de Tkinter.
-    
+
+    Retorna uma lista de resultados por certificado. O retorno é compatível com
+    chamadas legadas que ignoram o valor de retorno.
+
     Args:
         logger: Optional StructuredLogger for structured logging.
     """
@@ -92,61 +94,7 @@ def run_processing(cfg: RunConfig, logger=None) -> None:
     garantir_schema_nfse_notas()
 
     converter = NFSeXMLConverterComAPI(tipo_nota=cfg.tipo_nota, consultar_api=cfg.consultar_api)
-
-    def _process_tmp_dir(tmp_dir: str, base_dir_cert: str, periodo_start: date, periodo_end: date) -> None:
-        """Move XMLs para estrutura final, processa, persiste e atualiza planilha do *período filtrado*."""
-        moved = distribuir_por_competencia(tmp_dir, base_dir_cert)
-        xml_paths = moved.get('xml') or []
-        if not xml_paths:
-            logger.info("Nenhum XML novo para processar neste chunk.")
-            return
-
-        logger.info("Processando XMLs", {'count': len(xml_paths)})
-        dados = converter.process_multiple_files(xml_paths)
-        if not dados:
-            logger.warning("Nenhum dado extraído dos XMLs movidos.")
-            return
-
-        dados = converter.consultar_cnpjs_em_lote(dados)
-
-        # persistir no banco (dedupe por cert_alias+chave_nfse)
-        for d in dados:
-            try:
-                arquivo_origem = d.get('_arquivo_origem') or d.get('_Arquivo_Origem')
-                salvar_nota_nfse(cert_alias, getattr(cfg, 'processo_id', None), d, arquivo_origem=arquivo_origem)
-            except Exception as save_err:
-                logger.warning(f"Erro salvando nota | nota_chave={gerar_chave_nfse(d)} | arquivo={d.get('_arquivo_origem') or d.get('_Arquivo_Origem')} | erro={save_err}")
-
-        # planilha do período (incremental, 1 arquivo por execução/período)
-        # Regra: salvar SEMPRE de acordo com o período filtrado (start/end),
-        # evitando "jogar" notas em meses diferentes por causa da data de emissão/competência.
-        estrutura = criar_estrutura_pastas(
-            base_dir_cert,
-            data_referencia=datetime(periodo_end.year, periodo_end.month, 1),
-        )
-        planilhas_dir = estrutura['planilhas_dir']
-        
-        # Verifica se já existe alguma planilha na pasta para usar como base
-        planilhas_existentes = glob.glob(os.path.join(planilhas_dir, "auditoria_nfse*.xlsx"))
-        
-        if planilhas_existentes:
-            # Usa a primeira planilha existente como base (atualização incremental)
-            caminho_planilha = planilhas_existentes[0]
-            nome_periodo = os.path.basename(caminho_planilha).replace("auditoria_nfse_", "").replace(".xlsx", "")
-            logger.info("Planilha existente encontrada", {'planilha': os.path.basename(caminho_planilha)})
-        else:
-            # Cria nova planilha com nome baseado no período
-            nome_periodo = f"{periodo_start.isoformat()}_a_{periodo_end.isoformat()}"
-            planilha_nome = f"auditoria_nfse_{cert_alias}_{nome_periodo}.xlsx"
-            caminho_planilha = os.path.join(planilhas_dir, planilha_nome)
-
-        existentes, adicionados = atualizar_planilha_incremental(converter, caminho_planilha, dados)
-        logger.info("Planilha atualizada", {'periodo': nome_periodo, 'existentes': existentes, 'adicionados': adicionados, 'planilha': os.path.basename(caminho_planilha)})
-
-
-        # marca progresso ok (até o fim do chunk)
-        nonlocal last_ok_date
-        last_ok_date = periodo_end
+    resultados_execucao: list[dict[str, Any]] = []
 
     for i_cert, cert_alias in enumerate(cfg.cert_aliases, start=1):
         print(f"\n{'='*60}")
@@ -166,14 +114,132 @@ def run_processing(cfg: RunConfig, logger=None) -> None:
         upsert_state(cert_alias, status='running', last_error=None)
         last_ok_date: date | None = None
 
+        def _process_tmp_dir(tmp_dir: str, base_dir_cert: str, periodo_start: date, periodo_end: date) -> dict[str, Any]:
+            """Move XMLs para estrutura final, processa, persiste e atualiza planilha.
+
+            Retorna métricas e caminhos desta execução para permitir validação e
+            registro consistente de arquivos no processo.
+            """
+            moved = distribuir_por_competencia(tmp_dir, base_dir_cert)
+            xml_paths = list(moved.get('xml') or [])
+            pdf_paths = list(moved.get('pdf') or [])
+
+            resultado: dict[str, Any] = {
+                'cert_alias': cert_alias,
+                'periodo_start': periodo_start,
+                'periodo_end': periodo_end,
+                'xml_paths': xml_paths,
+                'pdf_paths': pdf_paths,
+                'planilha_paths': [],
+                'xml_movidos': len(xml_paths),
+                'pdf_movidos': len(pdf_paths),
+                'dados_extraidos': 0,
+                'notas_salvas': 0,
+                'erros_salvamento': [],
+                'status': 'sem_xml',
+            }
+
+            if not xml_paths:
+                logger.info("Nenhum XML novo para processar neste chunk.")
+                return resultado
+
+            logger.info("Processando XMLs", {'count': len(xml_paths)})
+            dados = converter.process_multiple_files(xml_paths)
+            resultado['dados_extraidos'] = len(dados or [])
+
+            if not dados:
+                logger.warning("Nenhum dado extraído dos XMLs movidos.")
+                resultado['status'] = 'sem_dados'
+                return resultado
+
+            dados = converter.consultar_cnpjs_em_lote(dados)
+            resultado['dados_extraidos'] = len(dados or [])
+
+            notas_salvas = 0
+            erros_salvamento: list[str] = []
+
+            # Persistir no banco (dedupe por cert_alias+chave_nfse)
+            for d in dados:
+                try:
+                    arquivo_origem = d.get('_arquivo_origem') or d.get('_Arquivo_Origem')
+                    salvar_nota_nfse(
+                        cert_alias,
+                        getattr(cfg, 'processo_id', None),
+                        d,
+                        arquivo_origem=arquivo_origem,
+                    )
+                    notas_salvas += 1
+                except Exception as save_err:
+                    erro_txt = (
+                        f"nota_chave={gerar_chave_nfse(d)} | "
+                        f"arquivo={d.get('_arquivo_origem') or d.get('_Arquivo_Origem')} | "
+                        f"erro={save_err}"
+                    )
+                    erros_salvamento.append(erro_txt)
+                    logger.warning(f"Erro salvando nota | {erro_txt}")
+
+            resultado['notas_salvas'] = notas_salvas
+            resultado['erros_salvamento'] = erros_salvamento
+
+            # Falha explícita: havia XML processável, mas nenhuma nota foi persistida.
+            if xml_paths and notas_salvas == 0:
+                resultado['status'] = 'falha_sem_notas'
+                return resultado
+
+            # Planilha do período (incremental, 1 arquivo por execução/período)
+            estrutura = criar_estrutura_pastas(
+                base_dir_cert,
+                data_referencia=datetime(periodo_end.year, periodo_end.month, 1),
+            )
+            planilhas_dir = estrutura['planilhas_dir']
+
+            # Verifica se já existe alguma planilha na pasta para usar como base
+            planilhas_existentes = glob.glob(os.path.join(planilhas_dir, "auditoria_nfse*.xlsx"))
+
+            if planilhas_existentes:
+                caminho_planilha = planilhas_existentes[0]
+                nome_periodo = os.path.basename(caminho_planilha).replace("auditoria_nfse_", "").replace(".xlsx", "")
+                logger.info("Planilha existente encontrada", {'planilha': os.path.basename(caminho_planilha)})
+            else:
+                nome_periodo = f"{periodo_start.isoformat()}_a_{periodo_end.isoformat()}"
+                planilha_nome = f"auditoria_nfse_{cert_alias}_{nome_periodo}.xlsx"
+                caminho_planilha = os.path.join(planilhas_dir, planilha_nome)
+
+            existentes, adicionados = atualizar_planilha_incremental(converter, caminho_planilha, dados)
+            logger.info(
+                "Planilha atualizada",
+                {
+                    'periodo': nome_periodo,
+                    'existentes': existentes,
+                    'adicionados': adicionados,
+                    'planilha': os.path.basename(caminho_planilha),
+                },
+            )
+
+            resultado['planilha_paths'] = [caminho_planilha] if os.path.exists(caminho_planilha) else []
+            resultado['status'] = 'ok'
+
+            nonlocal last_ok_date
+            last_ok_date = periodo_end
+            return resultado
+
+        resultado_cert: dict[str, Any] = {
+            'cert_alias': cert_alias,
+            'start': start,
+            'end': end,
+            'tmp_dir': None,
+            'download_ok': False,
+            'total_xmls_baixados': 0,
+            'processamento': None,
+            'status': 'pending',
+        }
+
         try:
-            # IMPORTANTE: Chunking no Python foi desativado.
-            # Para um dado certificado e período, chamamos o Playwright apenas UMA vez.
-            # Se houver >800 notas, o split é tratado INTERNAMENTE no Node, na mesma sessão (sem relogin/reabrir browser).
             print(f"\n📅 Período solicitado: {start.isoformat()} → {end.isoformat()}")
             run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
             tmp_dir = os.path.join(base_dir_cert, "tmp_downloads", run_id)
             os.makedirs(tmp_dir, exist_ok=True)
+            resultado_cert['tmp_dir'] = tmp_dir
 
             ok, total_xmls, need_to_split, error_msg = executar_fluxo_nfse_playwright(
                 cert_alias=cert_alias,
@@ -191,20 +257,45 @@ def run_processing(cfg: RunConfig, logger=None) -> None:
                 detail = f": {error_msg}" if error_msg else ""
                 raise RuntimeError(f"Falha no download Playwright para {cert_alias} ({start}..{end}){detail}")
 
-            _process_tmp_dir(tmp_dir, base_dir_cert, start, end)
+            resultado_cert['download_ok'] = True
+            resultado_cert['total_xmls_baixados'] = total_xmls or 0
+            resultado_cert['need_to_split'] = need_to_split
+
+            processamento = _process_tmp_dir(tmp_dir, base_dir_cert, start, end)
+            resultado_cert['processamento'] = processamento
+
+            # Validações de integridade: não permitir sucesso falso.
+            if (resultado_cert['total_xmls_baixados'] or 0) > 0 and processamento['xml_movidos'] == 0:
+                raise RuntimeError(
+                    f"Foram baixados {resultado_cert['total_xmls_baixados']} XML(s), mas nenhum XML novo foi distribuído/processado."
+                )
+
+            if processamento['xml_movidos'] > 0 and processamento['dados_extraidos'] == 0:
+                raise RuntimeError(
+                    f"{processamento['xml_movidos']} XML(s) foram movidos, mas nenhum dado foi extraído."
+                )
+
+            if processamento['xml_movidos'] > 0 and processamento['notas_salvas'] == 0:
+                raise RuntimeError(
+                    f"{processamento['xml_movidos']} XML(s) foram movidos, mas nenhuma nota foi persistida."
+                )
 
             upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
+            resultado_cert['status'] = 'ok'
 
         except Exception as e:
             print(f"❌ Erro no processamento para {cert_alias}: {e}")
             upsert_state(cert_alias, status='error', last_error=str(e))
+            resultado_cert['status'] = 'error'
+            resultado_cert['error'] = str(e)
+            resultados_execucao.append(resultado_cert)
             if getattr(cfg, 'processo_id', None):
                 raise
-            pass
+
+        else:
+            resultados_execucao.append(resultado_cert)
 
         finally:
-            # Política de espera pós-certificado (sempre, inclusive em erro)
-            # Não espera antes do 1º; a espera ocorre APÓS concluir cada certificado.
             try:
                 n = i_cert
                 sleep_s = 0.0
@@ -222,3 +313,5 @@ def run_processing(cfg: RunConfig, logger=None) -> None:
                     time.sleep(sleep_s)
             except Exception:
                 pass
+
+    return resultados_execucao

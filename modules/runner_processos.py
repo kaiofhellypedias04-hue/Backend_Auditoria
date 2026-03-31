@@ -1,12 +1,13 @@
 from __future__ import annotations
-import os
+
 import shutil
 import logging
 from pathlib import Path
-from datetime import date
-from typing import Optional
+from typing import Optional, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+import traceback
 
 logger_cleanup = logging.getLogger("cleanup")
 
@@ -16,10 +17,9 @@ from .execucoes_repo import atualizar_status_execucao, garantir_schema_nfse_exec
 from .arquivos_repo import garantir_schema_nfse_processo_arquivos
 from .storage import upload_pdf, upload_xml, upload_relatorio, is_s3_configured
 from .notas_repo import obter_resumo_processo, garantir_schema_nfse_notas
-from .schemas import LoginTypeEnum, TipoNotaEnum, StatusEnum, TipoArquivoEnum
+from .schemas import StatusEnum
 from .db import get_conn
-from datetime import datetime
-import traceback
+
 
 @dataclass
 class ProcessRunConfig(RunConfig):
@@ -29,40 +29,66 @@ class ProcessRunConfig(RunConfig):
 
 def run_processing(cfg: RunConfig, logger=None, execution_id: Optional[str] = None, processo_id: Optional[str] = None):
     """Wrapper for backward compat + new process integration.
-    
+
     If execution_id/processo_id provided, integrate DB tracking.
     """
     if execution_id and processo_id:
         return run_with_process(cfg, execution_id, processo_id, logger)
     else:
-        # Legacy call
         return run_processing_without_process(cfg, logger)
 
 
 def run_with_process(cfg: ProcessRunConfig, logger=None):
     garantir_schema_nfse_processos()
+    garantir_schema_nfse_execucoes()
     garantir_schema_nfse_processo_arquivos()
     garantir_schema_nfse_notas()
-    
-    # Update status running
+
     atualizar_status_processo(cfg.processo_id, StatusEnum.running, datetime.now())
     atualizar_status_execucao(cfg.execution_id, 'running', datetime.now())
-    
+
     try:
-        # Run core logic (download, convert, save notes with processo_id)
-        run_processing_without_process(cfg, logger)
-        
-        # Post-process: get totals from DB, register files and get file counts
+        # Executa lógica principal e recebe resultados detalhados desta execução.
+        resultados_execucao = run_processing_without_process(cfg, logger)
+
+        if not resultados_execucao:
+            raise RuntimeError("A execução não retornou resultados por certificado.")
+
+        erros = [r for r in resultados_execucao if r.get('status') == 'error']
+        if erros:
+            primeiro_erro = erros[0].get('error') or 'Falha na execução'
+            raise RuntimeError(primeiro_erro)
+
+        # Registra SOMENTE os arquivos desta execução/processo.
+        num_xml, num_pdf, num_relatorio, total_registrados = register_process_files(cfg, resultados_execucao)
+
+        # Recalcula resumo após persistência e registro.
         resumo = obter_resumo_processo(cfg.processo_id)
         total_notas = resumo.get('total_notas', 0)
         total_corretas = resumo.get('total_corretas', 0)
         total_divergentes = resumo.get('total_divergentes', 0)
 
-        # 1. Faz upload de todos os arquivos para o MinIO e registra no banco
-        num_xml, num_pdf = register_process_files(cfg)
-        atualizar_totais_processo(cfg.processo_id, total_notas, num_xml, num_pdf, total_corretas, total_divergentes)
+        atualizar_totais_processo(
+            cfg.processo_id,
+            total_notas,
+            num_xml,
+            num_pdf,
+            total_corretas,
+            total_divergentes,
+        )
 
-        # 2. Somente após confirmar que tudo subiu, apaga a pasta local
+        # Validação de integridade: não concluir com XML(s) e zero nota(s).
+        if num_xml > 0 and total_notas <= 0:
+            raise RuntimeError(
+                f"Processo {cfg.processo_id} possui {num_xml} XML(s) registrado(s), mas 0 notas persistidas/vinculadas."
+            )
+
+        # Se houve arquivos registrados, mas zero total, também consideramos inconsistente.
+        if total_registrados > 0 and total_notas <= 0:
+            raise RuntimeError(
+                f"Processo {cfg.processo_id} registrou {total_registrados} arquivo(s), mas 0 notas persistidas/vinculadas."
+            )
+
         resultado_cleanup = limpar_pasta_local(cfg)
         if resultado_cleanup.get("limpo"):
             logger_cleanup.info(
@@ -78,13 +104,26 @@ def run_with_process(cfg: ProcessRunConfig, logger=None):
 
         atualizar_status_processo(cfg.processo_id, StatusEnum.completed, finished_at=datetime.now())
         atualizar_status_execucao(cfg.execution_id, 'completed', finished_at=datetime.now())
-        
+
+        return resultados_execucao
+
     except Exception as e:
         aliases = ", ".join(cfg.cert_aliases or [])
         error_message = f"Processo {cfg.processo_id} falhou para [{aliases}]: {e}"
         logger_cleanup.exception("[Processo] Falha na execucao %s / processo %s", cfg.execution_id, cfg.processo_id)
-        atualizar_status_processo(cfg.processo_id, StatusEnum.failed, finished_at=datetime.now(), error_message=error_message)
-        atualizar_status_execucao(cfg.execution_id, 'failed', finished_at=datetime.now(), error=error_message, traceback=traceback.format_exc())
+        atualizar_status_processo(
+            cfg.processo_id,
+            StatusEnum.failed,
+            finished_at=datetime.now(),
+            error_message=error_message,
+        )
+        atualizar_status_execucao(
+            cfg.execution_id,
+            'failed',
+            finished_at=datetime.now(),
+            error=error_message,
+            traceback=traceback.format_exc(),
+        )
         raise RuntimeError(error_message) from e
 
 
@@ -94,64 +133,83 @@ def _apenas_upload(tarefa: dict) -> dict:
     Executado em thread paralela. Retorna dict com resultado + storage_key.
     """
     tipo_map = {
-        "pdf":       upload_pdf,
-        "xml":       upload_xml,
+        "pdf": upload_pdf,
+        "xml": upload_xml,
         "relatorio": upload_relatorio,
     }
-    fn_upload  = tipo_map[tarefa["tipo"]]
+    fn_upload = tipo_map[tarefa["tipo"]]
     storage_key = fn_upload(str(tarefa["path"]), tarefa["storage_key"])
     return {
-        "tipo":        tarefa["tipo"],
-        "path":        tarefa["path"],
-        "storage_key": storage_key,          # None se falhou
+        "tipo": tarefa["tipo"],
+        "path": tarefa["path"],
+        "storage_key": storage_key,
         "processo_id": tarefa["processo_id"],
-        "nome":        tarefa["path"].name,
-        "tamanho":     tarefa["path"].stat().st_size,
-        "ok":          storage_key is not None,
+        "nome": tarefa["path"].name,
+        "tamanho": tarefa["path"].stat().st_size,
+        "ok": storage_key is not None,
     }
 
 
-def register_process_files(cfg: RunConfig) -> tuple[int, int]:
+def _coletar_arquivos_da_execucao(cfg: RunConfig, resultados_execucao: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tarefas: list[dict[str, Any]] = []
+    vistos: set[tuple[str, str]] = set()
+
+    def _add_file(tipo: str, path_str: str):
+        if not path_str:
+            return
+        p = Path(path_str)
+        if not p.exists() or not p.is_file():
+            return
+        chave_visto = (tipo, str(p.resolve()))
+        if chave_visto in vistos:
+            return
+        vistos.add(chave_visto)
+        tarefas.append({
+            "tipo": tipo,
+            "path": p,
+            "storage_key": f"processos/{cfg.processo_id}/{p.name}",
+            "processo_id": cfg.processo_id,
+        })
+
+    for resultado in resultados_execucao:
+        processamento = resultado.get('processamento') or {}
+        for path in processamento.get('xml_paths') or []:
+            _add_file('xml', path)
+        for path in processamento.get('pdf_paths') or []:
+            _add_file('pdf', path)
+        for path in processamento.get('planilha_paths') or []:
+            _add_file('relatorio', path)
+
+    return tarefas
+
+
+def register_process_files(cfg: RunConfig, resultados_execucao: list[dict[str, Any]]) -> tuple[int, int, int, int]:
     """
-    1. Coleta todos os arquivos
-    2. Faz upload em paralelo pro MinIO (sem DB — threads livres)
-    3. Registra todos no banco em UMA única conexão em lote
-    Retorna (xml_count, pdf_count).
+    Registra SOMENTE arquivos desta execução:
+    1. Coleta caminhos devolvidos pelo runner
+    2. Faz upload em paralelo pro MinIO (sem DB)
+    3. Registra tudo no banco em uma única conexão
+
+    Retorna (xml_count, pdf_count, relatorio_count, total_registrados).
     """
-    CONTENT_TYPES = {
-        "pdf":       "application/pdf",
-        "xml":       "application/xml",
+    content_types = {
+        "pdf": "application/pdf",
+        "xml": "application/xml",
         "relatorio": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }
-    ENUM_TIPOS = {
-        "pdf":       TipoArquivoEnum.pdf,
-        "xml":       TipoArquivoEnum.xml,
-        "relatorio": TipoArquivoEnum.relatorio,
-    }
 
-    # ── 1. Coleta tarefas ────────────────────────────────────────────────────
-    tarefas = []
-    for cert_alias in cfg.cert_aliases:
-        base = Path(cfg.base_dir) / cert_alias
-        for p in base.rglob("*.pdf"):
-            tarefas.append({"tipo": "pdf",       "path": p, "storage_key": f"processos/{cfg.processo_id}/{p.name}", "processo_id": cfg.processo_id})
-        for p in base.rglob("*.xml"):
-            tarefas.append({"tipo": "xml",       "path": p, "storage_key": f"processos/{cfg.processo_id}/{p.name}", "processo_id": cfg.processo_id})
-        for p in base.rglob("auditoria_nfse*.xlsx"):
-            tarefas.append({"tipo": "relatorio", "path": p, "storage_key": f"processos/{cfg.processo_id}/{p.name}", "processo_id": cfg.processo_id})
-
+    tarefas = _coletar_arquivos_da_execucao(cfg, resultados_execucao)
     if not tarefas:
-        return 0, 0
+        return 0, 0, 0, 0
 
-    # ── 2. Upload paralelo pro MinIO (sem banco, sem lock) ───────────────────
-    MAX_WORKERS = min(20, len(tarefas))
-    logger_cleanup.info(f"[Upload] {len(tarefas)} arquivos → MinIO com {MAX_WORKERS} threads...")
+    max_workers = min(20, len(tarefas))
+    logger_cleanup.info(f"[Upload] {len(tarefas)} arquivos desta execução → MinIO com {max_workers} threads...")
 
     resultados = []
-    erros      = []
+    erros = []
     concluidos = 0
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_apenas_upload, t): t for t in tarefas}
         for future in as_completed(futures):
             try:
@@ -167,39 +225,51 @@ def register_process_files(cfg: RunConfig) -> tuple[int, int]:
                 logger_cleanup.error(f"[Upload] Erro: {e}")
 
     if erros:
-        logger_cleanup.warning(f"[Upload] {len(erros)} falha(s): {erros[:5]}")
+        raise RuntimeError(f"Falha no upload/registro de {len(erros)} arquivo(s): {erros[:5]}")
 
-    # ── 3. Registra tudo no banco em UMA única conexão ───────────────────────
     pdf_count = 0
     xml_count = 0
+    relatorio_count = 0
+    total_registrados = 0
 
     with get_conn() as conn:
         for res in resultados:
+            if not res.get('ok') or not res.get('storage_key'):
+                raise RuntimeError(f"Arquivo sem storage_key confirmado: {res.get('nome')}")
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO nfse_processo_arquivos
                         (processo_id, tipo_arquivo, nome_arquivo, storage_key,
                          caminho_local, content_type, tamanho_bytes)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT DO NOTHING
-                """, (
-                    res["processo_id"],
-                    res["tipo"],
-                    res["nome"],
-                    res["storage_key"],
-                    str(res["path"]),
-                    CONTENT_TYPES[res["tipo"]],
-                    res["tamanho"],
-                ))
+                    """,
+                    (
+                        res["processo_id"],
+                        res["tipo"],
+                        res["nome"],
+                        res["storage_key"],
+                        str(res["path"]),
+                        content_types[res["tipo"]],
+                        res["tamanho"],
+                    ),
+                )
+                total_registrados += 1
                 if res["tipo"] == "pdf":
                     pdf_count += 1
                 elif res["tipo"] == "xml":
                     xml_count += 1
+                elif res["tipo"] == "relatorio":
+                    relatorio_count += 1
             except Exception as e:
                 logger_cleanup.error(f"[Upload] Erro ao registrar {res['nome']} no banco: {e}")
+                raise
 
-    logger_cleanup.info(f"[Upload] Concluído: {pdf_count} PDFs + {xml_count} XMLs registrados no banco")
-    return xml_count, pdf_count
+    logger_cleanup.info(
+        f"[Upload] Concluído: {pdf_count} PDFs + {xml_count} XMLs + {relatorio_count} relatório(s) registrados no banco"
+    )
+    return xml_count, pdf_count, relatorio_count, total_registrados
 
 
 def limpar_pasta_local(cfg: RunConfig) -> dict:
@@ -214,17 +284,18 @@ def limpar_pasta_local(cfg: RunConfig) -> dict:
         logger_cleanup.info("[Cleanup] MinIO não configurado — pasta local mantida.")
         return {"limpo": False, "motivo": "minio_nao_configurado"}
 
-    # Verifica no banco se todos os arquivos do processo têm storage_key
     try:
         with get_conn() as conn:
             rows = conn.execute(
-                """SELECT COUNT(*) as total,
-                          SUM(CASE WHEN storage_key IS NOT NULL THEN 1 ELSE 0 END) as enviados
-                   FROM nfse_processo_arquivos
-                   WHERE processo_id = %s""",
-                (cfg.processo_id,)
+                """
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN storage_key IS NOT NULL THEN 1 ELSE 0 END) as enviados
+                FROM nfse_processo_arquivos
+                WHERE processo_id = %s
+                """,
+                (cfg.processo_id,),
             ).fetchone()
-        total   = rows["total"]   if rows else 0
+        total = rows["total"] if rows else 0
         enviados = rows["enviados"] if rows else 0
     except Exception as e:
         logger_cleanup.warning(f"[Cleanup] Erro ao verificar banco: {e}")
@@ -236,12 +307,10 @@ def limpar_pasta_local(cfg: RunConfig) -> dict:
 
     if enviados < total:
         logger_cleanup.warning(
-            f"[Cleanup] Apenas {enviados}/{total} arquivos enviados ao MinIO. "
-            "Pasta local NÃO será apagada."
+            f"[Cleanup] Apenas {enviados}/{total} arquivos enviados ao MinIO. Pasta local NÃO será apagada."
         )
         return {"limpo": False, "motivo": f"upload_incompleto_{enviados}/{total}"}
 
-    # Todos enviados — pode apagar
     pastas_removidas = []
     erros = []
     for cert_alias in cfg.cert_aliases:
