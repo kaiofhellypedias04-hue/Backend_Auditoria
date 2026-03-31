@@ -33,7 +33,10 @@ def run_processing(cfg: RunConfig, logger=None, execution_id: Optional[str] = No
     If execution_id/processo_id provided, integrate DB tracking.
     """
     if execution_id and processo_id:
-        return run_with_process(cfg, execution_id, processo_id, logger)
+        process_cfg = cfg if isinstance(cfg, ProcessRunConfig) else ProcessRunConfig(**{**cfg.__dict__})
+        process_cfg.execution_id = execution_id
+        process_cfg.processo_id = processo_id
+        return run_with_process(process_cfg, logger)
     else:
         return run_processing_without_process(cfg, logger)
 

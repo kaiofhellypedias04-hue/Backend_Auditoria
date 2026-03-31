@@ -264,24 +264,40 @@ def run_processing(cfg: RunConfig, logger=None) -> list[dict[str, Any]]:
             processamento = _process_tmp_dir(tmp_dir, base_dir_cert, start, end)
             resultado_cert['processamento'] = processamento
 
-            # Validações de integridade: não permitir sucesso falso.
-            if (resultado_cert['total_xmls_baixados'] or 0) > 0 and processamento['xml_movidos'] == 0:
-                raise RuntimeError(
-                    f"Foram baixados {resultado_cert['total_xmls_baixados']} XML(s), mas nenhum XML novo foi distribuído/processado."
-                )
+            total_xmls_baixados = resultado_cert['total_xmls_baixados'] or 0
+            xml_movidos = processamento['xml_movidos']
 
-            if processamento['xml_movidos'] > 0 and processamento['dados_extraidos'] == 0:
-                raise RuntimeError(
-                    f"{processamento['xml_movidos']} XML(s) foram movidos, mas nenhum dado foi extraído."
+            # Cenário esperado: houve download, mas todos os XMLs já eram conhecidos/duplicados.
+            # Isso deve ser informativo e não um erro fatal.
+            if total_xmls_baixados > 0 and xml_movidos == 0:
+                logger.info(
+                    "Download concluído sem XML novo para processar",
+                    {
+                        'cert_alias': cert_alias,
+                        'periodo_start': start.isoformat(),
+                        'periodo_end': end.isoformat(),
+                        'xmls_baixados': total_xmls_baixados,
+                        'xmls_novos': 0,
+                        'xmls_duplicados_ou_ja_conhecidos': total_xmls_baixados,
+                    },
                 )
+                processamento['status'] = 'sem_novos'
+                resultado_cert['status'] = 'sem_novos'
+                upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
+            else:
+                # Validações de integridade: não permitir sucesso falso quando há XML novo.
+                if xml_movidos > 0 and processamento['dados_extraidos'] == 0:
+                    raise RuntimeError(
+                        f"{xml_movidos} XML(s) foram movidos, mas nenhum dado foi extraído."
+                    )
 
-            if processamento['xml_movidos'] > 0 and processamento['notas_salvas'] == 0:
-                raise RuntimeError(
-                    f"{processamento['xml_movidos']} XML(s) foram movidos, mas nenhuma nota foi persistida."
-                )
+                if xml_movidos > 0 and processamento['notas_salvas'] == 0:
+                    raise RuntimeError(
+                        f"{xml_movidos} XML(s) foram movidos, mas nenhuma nota foi persistida."
+                    )
 
-            upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
-            resultado_cert['status'] = 'ok'
+                upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
+                resultado_cert['status'] = 'ok'
 
         except Exception as e:
             print(f"❌ Erro no processamento para {cert_alias}: {e}")
