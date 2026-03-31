@@ -4,6 +4,12 @@ Integracao com storage S3 compativel.
 - Upload de PDFs, XMLs e relatorios apos processamento
 - Geracao de URLs pre-assinadas para download
 - Limpeza automatica de arquivos antigos
+
+MODO COMPATIVEL SEM S3:
+- Se o S3/MinIO nao estiver configurado, o sistema continua operando em modo local
+- Uploads retornam o storage_key "logico" para nao quebrar o fluxo do processo
+- Downloads continuam podendo usar caminho_local no backend
+- Limpeza de storage remoto e ignorada quando S3 nao estiver configurado
 """
 import logging
 import threading
@@ -91,12 +97,28 @@ def upload_file(
     storage_key: str,
     content_type: Optional[str] = None,
 ) -> Optional[str]:
-    s3 = get_s3_client()
-    if s3 is None:
+    """
+    Faz upload para S3 quando configurado.
+    Quando S3 NAO estiver configurado, opera em modo local sem quebrar o fluxo:
+    - valida que o arquivo local existe
+    - retorna o storage_key logico como sucesso
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        logger.error("[Storage] Arquivo local nao encontrado: %s", file_path)
         return None
 
+    s3 = get_s3_client()
+    if s3 is None:
+        logger.warning(
+            "[Storage] S3 nao configurado. Mantendo arquivo em modo local: %s -> %s",
+            file_path,
+            storage_key,
+        )
+        return storage_key
+
     bucket = get_s3_settings()["bucket"]
-    path = Path(file_path)
 
     try:
         data = path.read_bytes()
@@ -134,6 +156,7 @@ def generate_presigned_download_url(
 ) -> Optional[str]:
     s3 = get_s3_client()
     if s3 is None:
+        logger.info("[Storage] URL pre-assinada indisponivel em modo local para %s", storage_key)
         return None
 
     s = get_s3_settings()
@@ -157,12 +180,12 @@ def get_local_file_path(caminho_local: str) -> Path:
 
 def limpar_arquivos_antigos_minio(dias: int = RETENCAO_DIAS) -> dict:
     if not is_s3_configured():
-        logger.info("[S3] Storage externo nao configurado; limpeza ignorada.")
+        logger.info("[Storage] S3 nao configurado; limpeza remota ignorada.")
         return {"removidos": 0, "erros": 0}
 
     s3 = get_s3_client()
     if s3 is None:
-        logger.info("[S3] Cliente indisponivel; limpeza ignorada.")
+        logger.info("[Storage] Cliente S3 indisponivel; limpeza remota ignorada.")
         return {"removidos": 0, "erros": 0}
 
     s = get_s3_settings()
