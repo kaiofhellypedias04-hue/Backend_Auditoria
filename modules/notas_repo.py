@@ -197,8 +197,19 @@ def listar_regras_atribuicao() -> List[dict]:
     return [dict(r) for r in rows]
 
 
-def _listar_regras_ativas() -> List[dict]:
-    return [r for r in listar_regras_atribuicao() if r.get("ativo")]
+def _listar_regras_ativas(conn=None) -> List[dict]:
+    if conn is None:
+        return [r for r in listar_regras_atribuicao() if r.get("ativo")]
+
+    rows = conn.execute(
+        """
+        SELECT id, campo, operador, valor, responsavel, prioridade, ativo, created_at, updated_at
+        FROM nfse_regras_atribuicao
+        WHERE ativo = TRUE
+        ORDER BY prioridade ASC, id ASC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def criar_regra_atribuicao(campo: str, operador: str, valor: str, responsavel: str, prioridade: int = 100, ativo: bool = True) -> dict:
@@ -240,9 +251,9 @@ def excluir_regra_atribuicao(regra_id: int) -> bool:
     return bool(row)
 
 
-def resolver_responsavel_automatico(cert_alias: str, data: dict) -> Optional[str]:
-    regras = _listar_regras_ativas()
-    for regra in regras:
+def resolver_responsavel_automatico(cert_alias: str, data: dict, regras: Optional[List[dict]] = None) -> Optional[str]:
+    regras_ativas = regras if regras is not None else _listar_regras_ativas()
+    for regra in regras_ativas:
         campo = str(regra.get("campo") or "")
         operador = str(regra.get("operador") or "contains")
         valor = str(regra.get("valor") or "")
@@ -371,23 +382,37 @@ def _build_campos_ausentes_xml(data: dict) -> Optional[str]:
     return " | ".join(faltantes) if faltantes else None
 
 
-def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arquivo_origem: str | None = None) -> str:
+def _obter_tipo_nota_processo(conn, processo_id: str | None) -> str:
     tipo_nota = "tomados"
+    if not processo_id:
+        return tipo_nota
 
-    if processo_id:
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT tipo_nota FROM nfse_processos WHERE id = %s",
-                (processo_id,)
-            ).fetchone()
-            if row:
-                try:
-                    tipo_nota = row["tipo_nota"] or tipo_nota
-                except Exception:
-                    try:
-                        tipo_nota = row[0] or tipo_nota
-                    except Exception:
-                        pass
+    row = conn.execute(
+        "SELECT tipo_nota FROM nfse_processos WHERE id = %s",
+        (processo_id,)
+    ).fetchone()
+    if row:
+        try:
+            tipo_nota = row["tipo_nota"] or tipo_nota
+        except Exception:
+            try:
+                tipo_nota = row[0] or tipo_nota
+            except Exception:
+                pass
+    return tipo_nota
+
+
+def _salvar_nota_nfse_conn(
+    conn,
+    cert_alias: str,
+    processo_id: str | None,
+    data: dict,
+    arquivo_origem: str | None = None,
+    *,
+    tipo_nota: Optional[str] = None,
+    regras_ativas: Optional[List[dict]] = None,
+) -> str:
+    tipo_nota = tipo_nota or _obter_tipo_nota_processo(conn, processo_id)
 
     nome_raw = data.get("Razão Social") or "—"
     doc_raw = data.get("CNPJ/CPF") or "—"
@@ -423,129 +448,182 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
     irrf_calculado = _to_decimal(data.get("_IRRF_Calculado"))
     csrf_calculado = _to_decimal(data.get("_CSRF_Calculado"))
     iss_calculado = _to_decimal(data.get("_ISS_Calculado"))
-    responsavel_automatico = resolver_responsavel_automatico(cert_alias, data)
+    responsavel_automatico = resolver_responsavel_automatico(cert_alias, data, regras=regras_ativas)
 
-    with get_conn() as conn:
-        row = conn.execute(
+    row = conn.execute(
+        """
+        INSERT INTO nfse_notas (
+          cert_alias, processo_id, chave_nfse, tipo_nota, parte_exibicao_nome,
+          parte_exibicao_doc, parte_exibicao_tipo,
+          numero_documento, competencia, data_emissao, municipio,
+          cnpj_prestador, razao_social,
+          valor_total, valor_bc, valor_liquido, valor_liquido_correto,
+          csrf, irrf, percentual_irrf, inss, iss,
+          incidencia_iss, data_pagamento,
+          codigo_servico, descricao_servico, codigo_nbs, codigo_cnae, descricao_cnae,
+          simples_xml, consulta_simples_api,
+          status_simples_nacional, status_csrf, status_irrf, status_inss, status_base_calculo, status_valor_liquido,
+          campos_ausentes_xml, alertas_fiscais,
+          irrf_calculado, csrf_calculado, iss_calculado,
+          responsavel,
+          dados_completos, arquivo_origem,
+          updated_at
+        )
+        VALUES (
+          %s,%s,%s,%s,%s,%s,%s,
+          %s,%s,%s,%s,
+          %s,%s,
+          %s,%s,%s,%s,
+          %s,%s,%s,%s,%s,
+          %s,%s,
+          %s,%s,%s,%s,%s,
+          %s,%s,
+          %s,%s,%s,%s,%s,%s,
+          %s,%s,
+          %s,%s,%s,
+          %s,
+          %s,%s,
+          now()
+        )
+        ON CONFLICT (cert_alias, chave_nfse)
+        DO UPDATE SET
+          tipo_nota = EXCLUDED.tipo_nota,
+          parte_exibicao_nome = EXCLUDED.parte_exibicao_nome,
+          parte_exibicao_doc = EXCLUDED.parte_exibicao_doc,
+          parte_exibicao_tipo = EXCLUDED.parte_exibicao_tipo,
+          numero_documento = EXCLUDED.numero_documento,
+          competencia = EXCLUDED.competencia,
+          data_emissao = EXCLUDED.data_emissao,
+          municipio = EXCLUDED.municipio,
+          cnpj_prestador = EXCLUDED.cnpj_prestador,
+          razao_social = EXCLUDED.razao_social,
+          valor_total = EXCLUDED.valor_total,
+          valor_bc = EXCLUDED.valor_bc,
+          valor_liquido = EXCLUDED.valor_liquido,
+          valor_liquido_correto = EXCLUDED.valor_liquido_correto,
+          csrf = EXCLUDED.csrf,
+          irrf = EXCLUDED.irrf,
+          percentual_irrf = EXCLUDED.percentual_irrf,
+          inss = EXCLUDED.inss,
+          iss = EXCLUDED.iss,
+          incidencia_iss = EXCLUDED.incidencia_iss,
+          data_pagamento = EXCLUDED.data_pagamento,
+          codigo_servico = EXCLUDED.codigo_servico,
+          descricao_servico = EXCLUDED.descricao_servico,
+          codigo_nbs = EXCLUDED.codigo_nbs,
+          codigo_cnae = EXCLUDED.codigo_cnae,
+          descricao_cnae = EXCLUDED.descricao_cnae,
+          simples_xml = EXCLUDED.simples_xml,
+          consulta_simples_api = EXCLUDED.consulta_simples_api,
+          status_simples_nacional = EXCLUDED.status_simples_nacional,
+          status_csrf = EXCLUDED.status_csrf,
+          status_irrf = EXCLUDED.status_irrf,
+          status_inss = EXCLUDED.status_inss,
+          status_base_calculo = EXCLUDED.status_base_calculo,
+          status_valor_liquido = EXCLUDED.status_valor_liquido,
+          campos_ausentes_xml = EXCLUDED.campos_ausentes_xml,
+          alertas_fiscais = EXCLUDED.alertas_fiscais,
+          irrf_calculado = EXCLUDED.irrf_calculado,
+          csrf_calculado = EXCLUDED.csrf_calculado,
+          iss_calculado = EXCLUDED.iss_calculado,
+          responsavel = COALESCE(NULLIF(nfse_notas.responsavel, ''), EXCLUDED.responsavel),
+          dados_completos = EXCLUDED.dados_completos,
+          arquivo_origem = COALESCE(EXCLUDED.arquivo_origem, nfse_notas.arquivo_origem),
+          updated_at = now()
+        RETURNING id
+        """,
+        (
+            cert_alias, processo_id, chave_nfse, tipo_nota,
+            parte_exibicao_nome, parte_exibicao_doc, parte_exibicao_tipo,
+            data.get("N° Documento"), data.get("Competência"),
+            data.get("Data de Emissão"), data.get("Município"),
+            data.get("CNPJ/CPF"), data.get("Razão Social"),
+            valor_total, valor_bc, valor_liquido, valor_liquido_correto,
+            csrf, irrf, _to_decimal(data.get("Percentual IRRF")), inss, iss,
+            data.get("Incidência do ISS"), data.get("Data do pagamento"),
+            data.get("Código de serviço"), data.get("Descrição do Serviço"),
+            data.get("Código NBS"), data.get("Código CNAE"), data.get("Descrição CNAE"),
+            data.get("Simples Nacional / XML"), data.get("Consulta Simples API"),
+            data.get("Status Simples Nacional"), data.get("Status CSRF"),
+            data.get("Status IRRF"), data.get("Status INSS"),
+            status_base_calculo, status_valor_liquido,
+            campos_ausentes_xml, alertas_fiscais_txt,
+            irrf_calculado, csrf_calculado, iss_calculado,
+            responsavel_automatico,
+            Jsonb(data), arquivo_origem,
+        ),
+    ).fetchone()
+
+    nota_id = _extract_row_id(row)
+
+    if row and nota_id is None:
+        raise RuntimeError(f"RETURNING id veio em formato inesperado: {type(row)} / {row}")
+
+    if processo_id and nota_id is not None:
+        conn.execute(
             """
-            INSERT INTO nfse_notas (
-              cert_alias, processo_id, chave_nfse, tipo_nota, parte_exibicao_nome,
-              parte_exibicao_doc, parte_exibicao_tipo,
-              numero_documento, competencia, data_emissao, municipio,
-              cnpj_prestador, razao_social,
-              valor_total, valor_bc, valor_liquido, valor_liquido_correto,
-              csrf, irrf, percentual_irrf, inss, iss,
-              incidencia_iss, data_pagamento,
-              codigo_servico, descricao_servico, codigo_nbs, codigo_cnae, descricao_cnae,
-              simples_xml, consulta_simples_api,
-              status_simples_nacional, status_csrf, status_irrf, status_inss, status_base_calculo, status_valor_liquido,
-              campos_ausentes_xml, alertas_fiscais,
-              irrf_calculado, csrf_calculado, iss_calculado,
-              responsavel,
-              dados_completos, arquivo_origem,
-              updated_at
-            )
-            VALUES (
-              %s,%s,%s,%s,%s,%s,%s,
-              %s,%s,%s,%s,
-              %s,%s,
-              %s,%s,%s,%s,
-              %s,%s,%s,%s,%s,
-              %s,%s,
-              %s,%s,%s,%s,%s,
-              %s,%s,
-              %s,%s,%s,%s,%s,%s,
-              %s,%s,
-              %s,%s,%s,
-              %s,
-              %s,%s,
-              now()
-            )
-            ON CONFLICT (cert_alias, chave_nfse)
-            DO UPDATE SET
-              tipo_nota = EXCLUDED.tipo_nota,
-              parte_exibicao_nome = EXCLUDED.parte_exibicao_nome,
-              parte_exibicao_doc = EXCLUDED.parte_exibicao_doc,
-              parte_exibicao_tipo = EXCLUDED.parte_exibicao_tipo,
-              numero_documento = EXCLUDED.numero_documento,
-              competencia = EXCLUDED.competencia,
-              data_emissao = EXCLUDED.data_emissao,
-              municipio = EXCLUDED.municipio,
-              cnpj_prestador = EXCLUDED.cnpj_prestador,
-              razao_social = EXCLUDED.razao_social,
-              valor_total = EXCLUDED.valor_total,
-              valor_bc = EXCLUDED.valor_bc,
-              valor_liquido = EXCLUDED.valor_liquido,
-              valor_liquido_correto = EXCLUDED.valor_liquido_correto,
-              csrf = EXCLUDED.csrf,
-              irrf = EXCLUDED.irrf,
-              percentual_irrf = EXCLUDED.percentual_irrf,
-              inss = EXCLUDED.inss,
-              iss = EXCLUDED.iss,
-              incidencia_iss = EXCLUDED.incidencia_iss,
-              data_pagamento = EXCLUDED.data_pagamento,
-              codigo_servico = EXCLUDED.codigo_servico,
-              descricao_servico = EXCLUDED.descricao_servico,
-              codigo_nbs = EXCLUDED.codigo_nbs,
-              codigo_cnae = EXCLUDED.codigo_cnae,
-              descricao_cnae = EXCLUDED.descricao_cnae,
-              simples_xml = EXCLUDED.simples_xml,
-              consulta_simples_api = EXCLUDED.consulta_simples_api,
-              status_simples_nacional = EXCLUDED.status_simples_nacional,
-              status_csrf = EXCLUDED.status_csrf,
-              status_irrf = EXCLUDED.status_irrf,
-              status_inss = EXCLUDED.status_inss,
-              status_base_calculo = EXCLUDED.status_base_calculo,
-              status_valor_liquido = EXCLUDED.status_valor_liquido,
-              campos_ausentes_xml = EXCLUDED.campos_ausentes_xml,
-              alertas_fiscais = EXCLUDED.alertas_fiscais,
-              irrf_calculado = EXCLUDED.irrf_calculado,
-              csrf_calculado = EXCLUDED.csrf_calculado,
-              iss_calculado = EXCLUDED.iss_calculado,
-              responsavel = COALESCE(NULLIF(nfse_notas.responsavel, ''), EXCLUDED.responsavel),
-              dados_completos = EXCLUDED.dados_completos,
-              arquivo_origem = COALESCE(EXCLUDED.arquivo_origem, nfse_notas.arquivo_origem),
-              updated_at = now()
-            RETURNING id
+            INSERT INTO nfse_processo_notas (processo_id, nota_id)
+            VALUES (%s, %s)
+            ON CONFLICT (processo_id, nota_id) DO NOTHING
             """,
-            (
-                cert_alias, processo_id, chave_nfse, tipo_nota,
-                parte_exibicao_nome, parte_exibicao_doc, parte_exibicao_tipo,
-                data.get("N° Documento"), data.get("Competência"),
-                data.get("Data de Emissão"), data.get("Município"),
-                data.get("CNPJ/CPF"), data.get("Razão Social"),
-                valor_total, valor_bc, valor_liquido, valor_liquido_correto,
-                csrf, irrf, _to_decimal(data.get("Percentual IRRF")), inss, iss,
-                data.get("Incidência do ISS"), data.get("Data do pagamento"),
-                data.get("Código de serviço"), data.get("Descrição do Serviço"),
-                data.get("Código NBS"), data.get("Código CNAE"), data.get("Descrição CNAE"),
-                data.get("Simples Nacional / XML"), data.get("Consulta Simples API"),
-                data.get("Status Simples Nacional"), data.get("Status CSRF"),
-                data.get("Status IRRF"), data.get("Status INSS"),
-                status_base_calculo, status_valor_liquido,
-                campos_ausentes_xml, alertas_fiscais_txt,
-                irrf_calculado, csrf_calculado, iss_calculado,
-                responsavel_automatico,
-                Jsonb(data), arquivo_origem,
-            ),
-        ).fetchone()
-
-        nota_id = _extract_row_id(row)
-
-        if row and nota_id is None:
-            raise RuntimeError(f"RETURNING id veio em formato inesperado: {type(row)} / {row}")
-
-        if processo_id and nota_id is not None:
-            conn.execute(
-                """
-                INSERT INTO nfse_processo_notas (processo_id, nota_id)
-                VALUES (%s, %s)
-                ON CONFLICT (processo_id, nota_id) DO NOTHING
-                """,
-                (processo_id, nota_id),
-            )
+            (processo_id, nota_id),
+        )
 
     return chave_nfse
+
+
+def salvar_notas_nfse_em_lote(cert_alias: str, processo_id: str | None, dados: List[dict]) -> Dict[str, Any]:
+    resultado: Dict[str, Any] = {
+        "notas_salvas": 0,
+        "chaves_salvas": [],
+        "erros_salvamento": [],
+    }
+
+    if not dados:
+        return resultado
+
+    with get_conn() as conn:
+        tipo_nota = _obter_tipo_nota_processo(conn, processo_id)
+        regras_ativas = _listar_regras_ativas(conn)
+
+        for d in dados:
+            try:
+                arquivo_origem = d.get('_arquivo_origem') or d.get('_Arquivo_Origem')
+                chave = _salvar_nota_nfse_conn(
+                    conn,
+                    cert_alias,
+                    processo_id,
+                    d,
+                    arquivo_origem=arquivo_origem,
+                    tipo_nota=tipo_nota,
+                    regras_ativas=regras_ativas,
+                )
+                resultado["notas_salvas"] += 1
+                resultado["chaves_salvas"].append(chave)
+            except Exception as save_err:
+                erro_txt = (
+                    f"nota_chave={gerar_chave_nfse(d)} | "
+                    f"arquivo={d.get('_arquivo_origem') or d.get('_Arquivo_Origem')} | "
+                    f"erro={save_err}"
+                )
+                resultado["erros_salvamento"].append(erro_txt)
+
+    return resultado
+
+
+def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arquivo_origem: str | None = None) -> str:
+    with get_conn() as conn:
+        regras_ativas = _listar_regras_ativas(conn)
+        tipo_nota = _obter_tipo_nota_processo(conn, processo_id)
+        return _salvar_nota_nfse_conn(
+            conn,
+            cert_alias,
+            processo_id,
+            data,
+            arquivo_origem=arquivo_origem,
+            tipo_nota=tipo_nota,
+            regras_ativas=regras_ativas,
+        )
 
 
 def atualizar_nota_campos_editaveis(

@@ -14,8 +14,7 @@ from .playwright_downloader import executar_fluxo_nfse_playwright
 from .downloader import distribuir_por_competencia, criar_estrutura_pastas
 from .spreadsheet import atualizar_planilha_incremental
 from .notas_repo import (
-    salvar_nota_nfse,
-    gerar_chave_nfse,
+    salvar_notas_nfse_em_lote,
     garantir_schema_nfse_notas,
 )
 from .run_state_repo import upsert_state, garantir_schema_run_state
@@ -155,28 +154,16 @@ def run_processing(cfg: RunConfig, logger=None) -> list[dict[str, Any]]:
             dados = converter.consultar_cnpjs_em_lote(dados)
             resultado['dados_extraidos'] = len(dados or [])
 
-            notas_salvas = 0
-            erros_salvamento: list[str] = []
+            persistencia = salvar_notas_nfse_em_lote(
+                cert_alias,
+                getattr(cfg, 'processo_id', None),
+                dados,
+            )
+            notas_salvas = int(persistencia.get('notas_salvas') or 0)
+            erros_salvamento = list(persistencia.get('erros_salvamento') or [])
 
-            # Persistir no banco (dedupe por cert_alias+chave_nfse)
-            for d in dados:
-                try:
-                    arquivo_origem = d.get('_arquivo_origem') or d.get('_Arquivo_Origem')
-                    salvar_nota_nfse(
-                        cert_alias,
-                        getattr(cfg, 'processo_id', None),
-                        d,
-                        arquivo_origem=arquivo_origem,
-                    )
-                    notas_salvas += 1
-                except Exception as save_err:
-                    erro_txt = (
-                        f"nota_chave={gerar_chave_nfse(d)} | "
-                        f"arquivo={d.get('_arquivo_origem') or d.get('_Arquivo_Origem')} | "
-                        f"erro={save_err}"
-                    )
-                    erros_salvamento.append(erro_txt)
-                    logger.warning(f"Erro salvando nota | {erro_txt}")
+            for erro_txt in erros_salvamento:
+                logger.warning(f"Erro salvando nota | {erro_txt}")
 
             resultado['notas_salvas'] = notas_salvas
             resultado['erros_salvamento'] = erros_salvamento
@@ -264,40 +251,24 @@ def run_processing(cfg: RunConfig, logger=None) -> list[dict[str, Any]]:
             processamento = _process_tmp_dir(tmp_dir, base_dir_cert, start, end)
             resultado_cert['processamento'] = processamento
 
-            total_xmls_baixados = resultado_cert['total_xmls_baixados'] or 0
-            xml_movidos = processamento['xml_movidos']
-
-            # Cenário esperado: houve download, mas todos os XMLs já eram conhecidos/duplicados.
-            # Isso deve ser informativo e não um erro fatal.
-            if total_xmls_baixados > 0 and xml_movidos == 0:
-                logger.info(
-                    "Download concluído sem XML novo para processar",
-                    {
-                        'cert_alias': cert_alias,
-                        'periodo_start': start.isoformat(),
-                        'periodo_end': end.isoformat(),
-                        'xmls_baixados': total_xmls_baixados,
-                        'xmls_novos': 0,
-                        'xmls_duplicados_ou_ja_conhecidos': total_xmls_baixados,
-                    },
+            # Validações de integridade: não permitir sucesso falso.
+            if (resultado_cert['total_xmls_baixados'] or 0) > 0 and processamento['xml_movidos'] == 0:
+                raise RuntimeError(
+                    f"Foram baixados {resultado_cert['total_xmls_baixados']} XML(s), mas nenhum XML novo foi distribuído/processado."
                 )
-                processamento['status'] = 'sem_novos'
-                resultado_cert['status'] = 'sem_novos'
-                upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
-            else:
-                # Validações de integridade: não permitir sucesso falso quando há XML novo.
-                if xml_movidos > 0 and processamento['dados_extraidos'] == 0:
-                    raise RuntimeError(
-                        f"{xml_movidos} XML(s) foram movidos, mas nenhum dado foi extraído."
-                    )
 
-                if xml_movidos > 0 and processamento['notas_salvas'] == 0:
-                    raise RuntimeError(
-                        f"{xml_movidos} XML(s) foram movidos, mas nenhuma nota foi persistida."
-                    )
+            if processamento['xml_movidos'] > 0 and processamento['dados_extraidos'] == 0:
+                raise RuntimeError(
+                    f"{processamento['xml_movidos']} XML(s) foram movidos, mas nenhum dado foi extraído."
+                )
 
-                upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
-                resultado_cert['status'] = 'ok'
+            if processamento['xml_movidos'] > 0 and processamento['notas_salvas'] == 0:
+                raise RuntimeError(
+                    f"{processamento['xml_movidos']} XML(s) foram movidos, mas nenhuma nota foi persistida."
+                )
+
+            upsert_state(cert_alias, last_processed_date=last_ok_date or end, status='ok', last_error=None)
+            resultado_cert['status'] = 'ok'
 
         except Exception as e:
             print(f"❌ Erro no processamento para {cert_alias}: {e}")
