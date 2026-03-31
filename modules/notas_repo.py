@@ -57,6 +57,7 @@ def garantir_schema_nfse_notas():
           status_inss TEXT,
           status_base_calculo TEXT,
           status_valor_liquido TEXT,
+          campos_ausentes_xml TEXT,
           alertas_fiscais TEXT,
           irrf_calculado NUMERIC,
           csrf_calculado NUMERIC,
@@ -84,6 +85,7 @@ def garantir_schema_nfse_notas():
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS parte_exibicao_tipo TEXT")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS valor_liquido_correto NUMERIC")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS status_valor_liquido TEXT")
+        conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS campos_ausentes_xml TEXT")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS irrf_calculado NUMERIC")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS csrf_calculado NUMERIC")
         conn.execute("ALTER TABLE nfse_notas ADD COLUMN IF NOT EXISTS iss_calculado NUMERIC")
@@ -353,6 +355,22 @@ def _status_compare(xml_value: Optional[float], expected_value: Optional[float],
     return "ok" if abs(xml_value - expected_value) <= tolerance else "divergente"
 
 
+def _build_campos_ausentes_xml(data: dict) -> Optional[str]:
+    campos_obrigatorios = [
+        "N° Documento",
+        "Competência",
+        "Data de Emissão",
+        "Município",
+        "CNPJ/CPF",
+        "Razão Social",
+        "Valor Total",
+        "Valor Líquido",
+        "Valor B/C",
+    ]
+    faltantes = [campo for campo in campos_obrigatorios if data.get(campo) in (None, "")]
+    return " | ".join(faltantes) if faltantes else None
+
+
 def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arquivo_origem: str | None = None) -> str:
     tipo_nota = "tomados"
 
@@ -399,6 +417,7 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
 
     status_valor_liquido = _status_compare(valor_liquido, valor_liquido_correto)
     status_base_calculo = _status_compare(valor_bc, valor_total)
+    campos_ausentes_xml = _build_campos_ausentes_xml(data)
 
     alertas_fiscais_txt = _to_text_alertas(data.get("Alertas Fiscais"))
     irrf_calculado = _to_decimal(data.get("_IRRF_Calculado"))
@@ -420,7 +439,7 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               codigo_servico, descricao_servico, codigo_nbs, codigo_cnae, descricao_cnae,
               simples_xml, consulta_simples_api,
               status_simples_nacional, status_csrf, status_irrf, status_inss, status_base_calculo, status_valor_liquido,
-              alertas_fiscais,
+              campos_ausentes_xml, alertas_fiscais,
               irrf_calculado, csrf_calculado, iss_calculado,
               responsavel,
               dados_completos, arquivo_origem,
@@ -436,7 +455,8 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               %s,%s,%s,%s,%s,
               %s,%s,
               %s,%s,%s,%s,%s,%s,
-              %s,%s,%s,%s,%s,
+              %s,%s,
+              %s,%s,%s,
               %s,
               %s,%s,
               now()
@@ -477,6 +497,7 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
               status_inss = EXCLUDED.status_inss,
               status_base_calculo = EXCLUDED.status_base_calculo,
               status_valor_liquido = EXCLUDED.status_valor_liquido,
+              campos_ausentes_xml = EXCLUDED.campos_ausentes_xml,
               alertas_fiscais = EXCLUDED.alertas_fiscais,
               irrf_calculado = EXCLUDED.irrf_calculado,
               csrf_calculado = EXCLUDED.csrf_calculado,
@@ -502,7 +523,7 @@ def salvar_nota_nfse(cert_alias: str, processo_id: str | None, data: dict, arqui
                 data.get("Status Simples Nacional"), data.get("Status CSRF"),
                 data.get("Status IRRF"), data.get("Status INSS"),
                 status_base_calculo, status_valor_liquido,
-                alertas_fiscais_txt,
+                campos_ausentes_xml, alertas_fiscais_txt,
                 irrf_calculado, csrf_calculado, iss_calculado,
                 responsavel_automatico,
                 Jsonb(data), arquivo_origem,
