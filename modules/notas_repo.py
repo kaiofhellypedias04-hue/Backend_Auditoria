@@ -9,12 +9,17 @@ from psycopg.types.json import Jsonb
 
 from .db import get_conn
 from .nfse_keys import gerar_chave_nfse
-from .fiscal_status import build_sql_status_expr
+from .fiscal_status import (
+    build_sql_queue_divergence_expr,
+    build_sql_queue_status_expr,
+    build_sql_status_expr,
+    normalize_manual_queue_status,
+)
 
 
 STATUS_EXPR = build_sql_status_expr("n")
-
-STATUS_FILA_EXPR = f"""COALESCE(NULLIF(n.status_fila_manual, ''), {STATUS_EXPR})"""
+STATUS_FILA_EXPR = build_sql_queue_status_expr("n", status_expr=STATUS_EXPR)
+STATUS_FILA_DIVERGENCIA_EXPR = build_sql_queue_divergence_expr("n", status_expr=STATUS_EXPR)
 STATUS_FILA_FILTER_EXPR = f"LOWER(BTRIM(COALESCE({STATUS_FILA_EXPR}, '')))"
 
 
@@ -652,9 +657,12 @@ def atualizar_nota_campos_editaveis(
         novo_correto = valor_liquido_correto if valor_liquido_correto is not None else row["valor_liquido_correto"]
         valor_liquido = row["valor_liquido"]
         novo_status = _status_compare(valor_liquido, novo_correto)
-        novos_alertas = alertas_fiscais if alertas_fiscais is not None else row["alertas_fiscais"]
+        novos_alertas = _to_text_alertas(alertas_fiscais) if alertas_fiscais is not None else row["alertas_fiscais"]
         nova_obs = observacao_interna if observacao_interna is not None else row["observacao_interna"]
-        novo_status_fila_manual = _clean_text(status_fila_manual) if status_fila_manual is not None else row["status_fila_manual"]
+        if status_fila_manual is not None:
+            novo_status_fila_manual = normalize_manual_queue_status(status_fila_manual)
+        else:
+            novo_status_fila_manual = normalize_manual_queue_status(row["status_fila_manual"])
         nova_prioridade = _clean_text(prioridade_manual) if prioridade_manual is not None else row["prioridade_manual"]
         novo_responsavel = _clean_text(responsavel) if responsavel is not None else row["responsavel"]
 
@@ -783,6 +791,8 @@ def listar_notas_por_processo(
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
                    {STATUS_FILA_EXPR} as status_exibicao,
+                   {STATUS_FILA_EXPR} as status_fila_final,
+                   {STATUS_FILA_DIVERGENCIA_EXPR} as divergencia_fila_final,
                    n.incidencia_iss,
                    n.data_pagamento,
                    n.codigo_servico,
@@ -790,9 +800,15 @@ def listar_notas_por_processo(
                    n.codigo_nbs,
                    n.codigo_cnae as cnae,
                    n.descricao_cnae,
+                   n.simples_xml,
                    n.simples_xml as simples_nacional,
                    n.consulta_simples_api,
                    n.status_simples_nacional,
+                   NULLIF(BTRIM(COALESCE(n.status_simples_nacional, '')), '') IS NOT NULL
+                     AND LOWER(BTRIM(COALESCE(n.status_simples_nacional, ''))) NOT IN ('', 'ok', 'correto', 'sem divergencia', 'sem divergência') as divergencia_simples_nacional,
+                   n.campos_ausentes_xml,
+                   NULLIF(BTRIM(COALESCE(n.campos_ausentes_xml, '')), '') IS NOT NULL as possui_campos_ausentes_xml,
+                   NULLIF(BTRIM(COALESCE(n.alertas_fiscais, '')), '') IS NOT NULL as possui_alertas_fiscais,
                    n.status_csrf,
                    n.status_irrf,
                    n.status_inss,
@@ -852,9 +868,12 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    n.codigo_nbs,
                    n.codigo_cnae as cnae,
                    n.descricao_cnae,
+                   n.simples_xml,
                    n.simples_xml as simples_nacional,
                    n.consulta_simples_api,
                    n.status_simples_nacional,
+                   NULLIF(BTRIM(COALESCE(n.status_simples_nacional, '')), '') IS NOT NULL
+                     AND LOWER(BTRIM(COALESCE(n.status_simples_nacional, ''))) NOT IN ('', 'ok', 'correto', 'sem divergencia', 'sem divergência') as divergencia_simples_nacional,
                    n.status_csrf,
                    n.status_irrf,
                    n.status_inss,
@@ -872,7 +891,12 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
                    {STATUS_EXPR} as status,
                    {STATUS_FILA_EXPR} as status_fila,
                    {STATUS_FILA_EXPR} as status_exibicao,
+                   {STATUS_FILA_EXPR} as status_fila_final,
+                   {STATUS_FILA_DIVERGENCIA_EXPR} as divergencia_fila_final,
                    n.alertas_fiscais,
+                   n.campos_ausentes_xml,
+                   NULLIF(BTRIM(COALESCE(n.campos_ausentes_xml, '')), '') IS NOT NULL as possui_campos_ausentes_xml,
+                   NULLIF(BTRIM(COALESCE(n.alertas_fiscais, '')), '') IS NOT NULL as possui_alertas_fiscais,
                    n.observacao_interna,
                    n.status_fila_manual,
                    n.prioridade_manual,
@@ -910,8 +934,8 @@ def obter_resumo_processo(processo_id: str) -> Dict[str, Any]:
             f"""
             SELECT
                 COUNT(*) as total_notas,
-                COALESCE(SUM(CASE WHEN {STATUS_EXPR} = 'correta' THEN 1 ELSE 0 END), 0) as total_corretas,
-                COALESCE(SUM(CASE WHEN {STATUS_EXPR} = 'divergente' THEN 1 ELSE 0 END), 0) as total_divergentes,
+                COALESCE(SUM(CASE WHEN {STATUS_FILA_EXPR} = 'correta' THEN 1 ELSE 0 END), 0) as total_corretas,
+                COALESCE(SUM(CASE WHEN {STATUS_FILA_EXPR} = 'divergente' THEN 1 ELSE 0 END), 0) as total_divergentes,
                 COALESCE(SUM(n.valor_total), 0) as valor_total_processado
             FROM nfse_notas n
             WHERE EXISTS (
