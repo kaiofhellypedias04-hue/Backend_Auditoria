@@ -165,6 +165,7 @@ class NotaReportRow(BaseModel):
     status_fila: Optional[str] = None
     status_fila_final: Optional[str] = None
     divergencia_fila_final: Optional[bool] = None
+    divergencia_fila_label: Optional[str] = None
     incidencia_iss: Optional[str] = None
     codigo_servico: Optional[str] = None
     codigo_nbs: Optional[str] = None

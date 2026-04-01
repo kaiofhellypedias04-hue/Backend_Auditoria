@@ -72,7 +72,6 @@ def compute_queue_state(payload: dict[str, Any]) -> dict[str, Any]:
                 automatic_status == "divergente",
                 simples_divergente,
                 possui_campos_ausentes,
-                possui_alertas,
             )
         )
         status_fila_final = "divergente" if divergencia_fila_final else "correta"
@@ -82,6 +81,7 @@ def compute_queue_state(payload: dict[str, Any]) -> dict[str, Any]:
         "status_fila_manual_normalizado": manual_status,
         "status_fila_final": status_fila_final,
         "divergencia_fila_final": divergencia_fila_final,
+        "divergencia_fila_label": "Com divergência" if divergencia_fila_final else "Sem divergência",
         "possui_campos_ausentes_xml": possui_campos_ausentes,
         "possui_alertas_fiscais": possui_alertas,
         "divergencia_simples_nacional": simples_divergente,
@@ -122,7 +122,6 @@ def build_sql_queue_status_expr(alias: str = "n", status_expr: str | None = None
     manual_status_expr = f"LOWER(BTRIM(COALESCE({alias}.status_fila_manual, '')))"
     simples_status_expr = f"LOWER(BTRIM(COALESCE({alias}.status_simples_nacional, '')))"
     has_campos_ausentes_expr = f"NULLIF(BTRIM(COALESCE({alias}.campos_ausentes_xml, '')), '') IS NOT NULL"
-    has_alertas_expr = f"NULLIF(BTRIM(COALESCE({alias}.alertas_fiscais, '')), '') IS NOT NULL"
     ok_values_sql = ", ".join(f"'{value}'" for value in sorted(OK_VALUES))
     divergent_values_sql = ", ".join(f"'{value}'" for value in sorted(DIVERGENT_VALUES))
 
@@ -133,7 +132,6 @@ def build_sql_queue_status_expr(alias: str = "n", status_expr: str | None = None
       WHEN {automatic_status_expr} = 'divergente'
         OR ({simples_status_expr} <> '' AND {simples_status_expr} NOT IN ({ok_values_sql}))
         OR {has_campos_ausentes_expr}
-        OR {has_alertas_expr}
       THEN 'divergente'
       ELSE 'correta'
     END

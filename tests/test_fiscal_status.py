@@ -51,8 +51,9 @@ class FiscalStatusTests(unittest.TestCase):
         estado = compute_queue_state(payload)
         self.assertEqual(estado["status_fila_final"], "correta")
         self.assertFalse(estado["divergencia_fila_final"])
+        self.assertEqual(estado["divergencia_fila_label"], "Sem divergência")
 
-    def test_fila_sem_override_manual_considera_alertas_campos_e_simples(self):
+    def test_fila_sem_override_manual_considera_campos_e_simples(self):
         payload = {
             "status_fila_manual": None,
             "status_simples_nacional": "divergente",
@@ -67,6 +68,24 @@ class FiscalStatusTests(unittest.TestCase):
         estado = compute_queue_state(payload)
         self.assertEqual(estado["status_fila_final"], "divergente")
         self.assertTrue(estado["divergencia_fila_final"])
+
+    def test_alerta_fiscal_sozinho_nao_define_divergencia_final(self):
+        payload = {
+            "status_fila_manual": None,
+            "status_simples_nacional": "ok",
+            "status_csrf": "ok",
+            "status_irrf": "ok",
+            "status_inss": "ok",
+            "status_base_calculo": "ok",
+            "status_valor_liquido": "ok",
+            "campos_ausentes_xml": "",
+            "alertas_fiscais": "Alerta técnico",
+        }
+        estado = compute_queue_state(payload)
+        self.assertEqual(estado["status_fila_final"], "correta")
+        self.assertFalse(estado["divergencia_fila_final"])
+        self.assertTrue(estado["possui_alertas_fiscais"])
+        self.assertEqual(estado["divergencia_fila_label"], "Sem divergência")
 
     def test_normaliza_status_manual_para_valores_canonicos(self):
         self.assertEqual(normalize_manual_queue_status("ok"), "correta")
