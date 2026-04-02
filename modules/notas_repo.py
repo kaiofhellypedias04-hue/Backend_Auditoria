@@ -930,6 +930,131 @@ def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_s
     return [dict(r) for r in rows], _extract_total(total_row)
 
 
+def listar_notas_agrupadas(filters: Optional[dict] = None, page: int = 1, page_size: int = 200) -> tuple[List[dict], int]:
+    offset = (page - 1) * page_size
+    where, params = _build_where(filters)
+    grouping_numero_expr = "COALESCE(NULLIF(BTRIM(n.numero_documento), ''), NULLIF(BTRIM(n.chave_nfse), ''), CONCAT('__id__', n.id::text))"
+    grouping_doc_expr = "COALESCE(NULLIF(BTRIM(COALESCE(n.parte_exibicao_doc, n.cnpj_prestador, '')), ''), '__sem_doc__')"
+    grouping_data_expr = "COALESCE(n.data_emissao::text, '__sem_data__')"
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM (
+                SELECT DISTINCT ON (
+                           n.cert_alias,
+                           COALESCE(n.tipo_nota, ''),
+                           {grouping_numero_expr},
+                           {grouping_data_expr},
+                           {grouping_doc_expr}
+                       )
+                       n.id,
+                       COALESCE(ppn.processo_id, n.processo_id) as processo_id,
+                       COALESCE(p.cert_alias, n.cert_alias) as certificado,
+                       n.tipo_nota,
+                       n.numero_documento,
+                       n.competencia,
+                       n.municipio,
+                       n.chave_nfse as chave_acesso,
+                       n.data_emissao,
+                       COALESCE(n.parte_exibicao_doc, n.cnpj_prestador, 'â€”') as cnpj_cpf,
+                       COALESCE(n.parte_exibicao_nome, n.razao_social, 'â€”') as razao_social,
+                       COALESCE(n.parte_exibicao_tipo, '') as parte_exibicao_tipo,
+                       COALESCE(n.parte_exibicao_nome, n.razao_social, 'â€”') as parte_exibicao_nome,
+                       COALESCE(n.parte_exibicao_doc, n.cnpj_prestador, 'â€”') as parte_exibicao_doc,
+                       n.valor_total,
+                       n.valor_bc as valor_base,
+                       n.percentual_irrf,
+                       n.incidencia_iss,
+                       n.data_pagamento,
+                       n.codigo_servico,
+                       n.descricao_servico,
+                       n.codigo_nbs,
+                       n.codigo_cnae as cnae,
+                       n.descricao_cnae,
+                       n.simples_xml,
+                       n.simples_xml as simples_nacional,
+                       n.consulta_simples_api,
+                       n.status_simples_nacional,
+                       NULLIF(BTRIM(COALESCE(n.status_simples_nacional, '')), '') IS NOT NULL
+                         AND LOWER(BTRIM(COALESCE(n.status_simples_nacional, ''))) NOT IN ('', 'ok', 'correto', 'sem divergencia', 'sem divergÃªncia') as divergencia_simples_nacional,
+                       n.status_csrf,
+                       n.status_irrf,
+                       n.status_inss,
+                       n.status_base_calculo,
+                       n.valor_liquido,
+                       n.valor_liquido_correto,
+                       n.status_valor_liquido,
+                       n.csrf,
+                       n.irrf,
+                       n.iss,
+                       n.inss,
+                       n.irrf_calculado,
+                       n.csrf_calculado,
+                       n.iss_calculado,
+                       {STATUS_EXPR} as status,
+                       {STATUS_FILA_EXPR} as status_fila,
+                       {STATUS_FILA_EXPR} as status_exibicao,
+                       {STATUS_FILA_EXPR} as status_fila_final,
+                       {STATUS_FILA_DIVERGENCIA_EXPR} as divergencia_fila_final,
+                       CASE WHEN {STATUS_FILA_DIVERGENCIA_EXPR} THEN 'Com divergÃªncia' ELSE 'Sem divergÃªncia' END as divergencia_fila_label,
+                       n.alertas_fiscais,
+                       n.campos_ausentes_xml,
+                       NULLIF(BTRIM(COALESCE(n.campos_ausentes_xml, '')), '') IS NOT NULL as possui_campos_ausentes_xml,
+                       NULLIF(BTRIM(COALESCE(n.alertas_fiscais, '')), '') IS NOT NULL as possui_alertas_fiscais,
+                       n.observacao_interna,
+                       n.status_fila_manual,
+                       n.prioridade_manual,
+                       n.responsavel,
+                       n.created_at as dia_processado,
+                       n.created_at,
+                       n.updated_at
+                FROM nfse_notas n
+                LEFT JOIN LATERAL (
+                    SELECT ppn.processo_id
+                    FROM nfse_processo_notas ppn
+                    WHERE ppn.nota_id = n.id
+                    ORDER BY ppn.created_at DESC, ppn.processo_id DESC
+                    LIMIT 1
+                ) ppn ON TRUE
+                LEFT JOIN nfse_processos p ON p.id = COALESCE(ppn.processo_id, n.processo_id)
+                {where}
+                ORDER BY n.cert_alias,
+                         COALESCE(n.tipo_nota, ''),
+                         {grouping_numero_expr},
+                         {grouping_data_expr},
+                         {grouping_doc_expr},
+                         n.updated_at DESC,
+                         n.created_at DESC,
+                         n.id DESC
+            ) fila
+            ORDER BY fila.updated_at DESC, fila.created_at DESC, fila.id DESC
+            LIMIT %s OFFSET %s
+            """,
+            [*params, page_size, offset],
+        ).fetchall()
+
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM (
+                SELECT 1
+                FROM nfse_notas n
+                {where}
+                GROUP BY n.cert_alias,
+                         COALESCE(n.tipo_nota, ''),
+                         {grouping_numero_expr},
+                         {grouping_data_expr},
+                         {grouping_doc_expr}
+            ) fila
+            """,
+            params
+        ).fetchone()
+
+    return [dict(r) for r in rows], _extract_total(total_row)
+
+
 def obter_resumo_processo(processo_id: str) -> Dict[str, Any]:
     with get_conn() as conn:
         row = conn.execute(
